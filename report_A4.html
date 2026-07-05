@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Aufgabe 4&period;2 &mdash; Vergleich Modellqualit&auml;t vs&period; Policyqualit&auml;t</title>
+            <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only],
+.vscode-high-contrast:not(.vscode-high-contrast-light) img[src$=\#gh-light-mode-only],
+.vscode-high-contrast-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+            
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+<style>
+:root {
+  --color-note: #0969da;
+  --color-tip: #1a7f37;
+  --color-warning: #9a6700;
+  --color-severe: #bc4c00;
+  --color-caution: #d1242f;
+  --color-important: #8250df;
+}
+
+</style>
+<style>
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-note: #2f81f7;
+    --color-tip: #3fb950;
+    --color-warning: #d29922;
+    --color-severe: #db6d28;
+    --color-caution: #f85149;
+    --color-important: #a371f7;
+  }
+}
+
+</style>
+<style>
+.markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 16px;
+  color: inherit;
+  border-left: .25em solid #888;
+}
+
+.markdown-alert>:first-child {
+  margin-top: 0
+}
+
+.markdown-alert>:last-child {
+  margin-bottom: 0
+}
+
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1
+}
+
+.markdown-alert .markdown-alert-title .octicon {
+  margin-right: 0.5rem;
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+.markdown-alert.markdown-alert-note {
+  border-left-color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-important {
+  border-left-color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-tip {
+  border-left-color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-caution {
+  border-left-color: var(--color-caution);
+}
+
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: var(--color-caution);
+}
+
+</style>
+        
+        </head>
+        <body class="vscode-body vscode-light">
+            <h1 id="aufgabe-42--vergleich-modellqualität-vs-policyqualität">Aufgabe 4.2 — Vergleich Modellqualität vs. Policyqualität</h1>
+<p><img src="file:////Users/chenwh/Projects/python/arL/ex3/model_vs_policy_quality.png" alt="Modellqualität vs. Policy-Qualität"></p>
+<table>
+<thead>
+<tr>
+<th>N</th>
+<th>Rollout-MAE</th>
+<th>Mittlere Performanz</th>
+<th>Std</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>50</td>
+<td>0.005611</td>
+<td>472.70</td>
+<td>46.72</td>
+</tr>
+<tr>
+<td>100</td>
+<td>0.030178</td>
+<td>500.00</td>
+<td>0.00</td>
+</tr>
+<tr>
+<td>200</td>
+<td>0.012375</td>
+<td>483.85</td>
+<td>70.40</td>
+</tr>
+<tr>
+<td>500</td>
+<td>0.010853</td>
+<td>500.00</td>
+<td>0.00</td>
+</tr>
+<tr>
+<td>1000</td>
+<td>0.002705</td>
+<td>500.00</td>
+<td>0.00</td>
+</tr>
+</tbody>
+</table>
+<p>Es zeigt sich <strong>kein konsistenter Zusammenhang</strong> zwischen Modell- und Policy-Qualität:</p>
+<ul>
+<li>N=1000 hat den niedrigsten Rollout-Fehler (0.0027) und erreicht die maximale Performanz (500) — hier passt die Erwartung.</li>
+<li>N=100 hat dagegen den <strong>höchsten</strong> Rollout-Fehler (0.0302), erreicht aber trotzdem die maximale Performanz (500) — widerspricht der Erwartung.</li>
+<li>N=50 hat einen der niedrigsten Rollout-Fehler (0.0056), aber die <strong>schlechteste</strong> Performanz (472.70, hohe Streuung).</li>
+<li>N=200 liegt bei mittlerem Rollout-Fehler, zeigt aber die schwächste und instabilste Performanz (483.85, Std=70.40).</li>
+</ul>
+<p>Insgesamt: 3 von 5 Policies (N=100, 500, 1000) erreichen den Decken-Effekt von 500 Schritten trotz unterschiedlicher Modellqualität, während N=50 und N=200 darunter liegen — ohne dass ihre Modellfehler das erklären.</p>
+<h1 id="aufgabe-43--diskussion-der-leitfragen">Aufgabe 4.3 — Diskussion der Leitfragen</h1>
+<p><strong>1. Ab welcher Datenmenge entstehen deutliche Verbesserungen?</strong>
+Kein sauberer monotoner Trend: N=50→100 verbessert die Performanz deutlich (472.7→500), aber N=200 fällt wieder ab (483.85). Erst ab N=500 ist die maximale Performanz stabil erreicht.</p>
+<p><strong>2. Gibt es Sättigungseffekte bei Modell- oder Policy-Qualität?</strong>
+Bei der Policy ja — ab N=500 liegt die Performanz konstant beim technischen Maximum (500, Std=0). Bei der Modellqualität kein klarer Sättigungspunkt erkennbar; der Fehler schwankt uneinheitlich über N (kein monotoner Abfall).</p>
+<p><strong>3. Welche typischen Fehler zeigen sich bei kleinen Datensätzen?</strong>
+N=50 und N=200 zeigen die größte Streuung zwischen den 20 Startzuständen (Std=46.7 bzw. 70.4) — die Policy ist also nicht durchgängig stabil, sondern versagt bei einem Teil der Startzustände deutlich früher. Das deutet auf ungleichmäßige Abdeckung des Zustandsraums im Dynamik-Modell hin.</p>
+<p><strong>4. Spiegelt gute Forecast-Qualität automatisch gute Policy-Performanz wider?</strong>
+Nein. N=100 widerlegt das direkt: schlechtester Rollout-Fehler, aber perfekte Policy-Performanz. Ein guter Forecast ist demnach <strong>nicht hinreichend und nicht notwendig</strong> für eine gute Policy in diesem Setup — vermutlich weil PPO auch mit einem ungenauen Modell noch eine ausreichend stabile Strategie lernen kann, solange die für die Balance relevanten Zustandsbereiche halbwegs erfasst sind.</p>
+
+            
+            
+        </body>
+        </html>

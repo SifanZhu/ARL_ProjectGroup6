@@ -1,0 +1,4 @@
+stable_baselines3==2.6.0
+notebook==7.4.4
+scikit-learn==1.7.1
+pygame==2.6.1
