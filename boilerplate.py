@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 from stable_baselines3 import DQN, SAC, TD3
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.results_plotter import load_results, ts2xy
 from stable_baselines3.common.callbacks import EvalCallback
 
 TOTAL_TIMESTEPS = 10_000
@@ -43,8 +42,17 @@ def train(algo_name, algo_cls, env_id, timesteps=TOTAL_TIMESTEPS):
     return log_dir
 
 
+def load_eval_results(log_dir):
+    # deterministic evaluation rewards recorded periodically during training,
+    # not raw training-time episode rewards (exploration noise is excluded)
+    data = np.load(f"{log_dir}/evaluations.npz")
+    timesteps = data["timesteps"]
+    mean_rewards = data["results"].mean(axis=1)
+    return timesteps, mean_rewards
+
+
 def plot_reward_curve(log_dir, label):
-    x, y = ts2xy(load_results(log_dir), "timesteps")
+    x, y = load_eval_results(log_dir)
     plt.plot(x, y, label=label)
 
 
@@ -65,12 +73,11 @@ def main():
     for log_dir, label in log_dirs:
         plot_reward_curve(log_dir, label)
     plt.xlabel("Timesteps")
-    plt.ylabel("Episode Reward")
-    plt.title("Reward Curves")
+    plt.ylabel("Mean Evaluation Reward (deterministic)")
+    plt.title("Deterministic Evaluation Reward Curves")
     plt.legend()
     plt.tight_layout()
     plt.savefig("reward_curves.png")
-    plt.show()
 
 
 def plot_split_reward_curves():
@@ -85,29 +92,29 @@ def plot_split_reward_curves():
     # --- Subplot 1: DQN / CartPole ---
     name, env_id = runs[0]
     log_dir = f"{LOG_DIR_BASE}/{name}_{env_id}"
-    x, y = ts2xy(load_results(log_dir), "timesteps")
+    x, y = load_eval_results(log_dir)
     axes[0].plot(x, y, label=f"{name} ({env_id})", color="tab:blue")
     axes[0].set_title("CartPole-v1")
     axes[0].set_xlabel("Timesteps")
-    axes[0].set_ylabel("Episode Reward")
+    axes[0].set_ylabel("Mean Evaluation Reward (deterministic)")
     axes[0].legend()
 
     # --- Subplot 2: SAC vs TD3 / Pendulum ---
     colors = {"SAC": "tab:orange", "TD3": "tab:green"}
     for name, env_id in runs[1:]:
         log_dir = f"{LOG_DIR_BASE}/{name}_{env_id}"
-        x, y = ts2xy(load_results(log_dir), "timesteps")
+        x, y = load_eval_results(log_dir)
         axes[1].plot(x, y, label=f"{name} ({env_id})", color=colors[name])
     axes[1].set_title("Pendulum-v1")
     axes[1].set_xlabel("Timesteps")
     axes[1].legend()
 
-    fig.suptitle("Reward Curves (split by environment / reward scale)")
+    fig.suptitle("Deterministic Evaluation Reward Curves (split by environment / reward scale)")
     plt.tight_layout()
     plt.savefig("reward_curves_split.png", dpi=150)
-    plt.show()
 
 
 if __name__ == "__main__":
     main()
     plot_split_reward_curves()
+    plt.show()
