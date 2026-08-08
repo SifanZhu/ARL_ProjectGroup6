@@ -27,7 +27,7 @@ torch.manual_seed(SEED)
 
 # Hyper-parameters
 N_ACTIONS        = 11          # number of discrete torque bins
-HIDDEN_SIZE      = 128
+HIDDEN_SIZE      = 256
 LR               = 1e-3         # stable learning, slightly slower convergence
 GAMMA            = 0.99
 BUFFER_SIZE      = 100_000      # maximum number of transitions to store in the replay buffer
