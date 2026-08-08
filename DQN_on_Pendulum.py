@@ -43,8 +43,6 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
 
 
-# Shared components
-
 Transition = namedtuple("Transition", ("state", "action", "reward", "next_state", "done"))
 
 
