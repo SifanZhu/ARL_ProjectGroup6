@@ -62,7 +62,9 @@ Input (3) → Linear(256) → ReLU → Linear(256) → ReLU → Linear(N_ACTIONS
 
 The epsilon schedule follows:
 
-$$\varepsilon_t = \varepsilon_{\text{end}} + (\varepsilon_{\text{start}} - \varepsilon_{\text{end}}) \cdot e^{-t / \text{EPS\_DECAY}}$$
+$$\varepsilon_t = \varepsilon_{\text{end}} + (\varepsilon_{\text{start}} - \varepsilon_{\text{end}}) \cdot e^{-t / d}$$
+
+where $d$ = `EPS_DECAY`.
 
 ---
 
