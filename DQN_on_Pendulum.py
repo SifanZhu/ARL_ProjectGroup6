@@ -36,7 +36,7 @@ EPS_START        = 1.0
 EPS_END          = 0.05
 EPS_DECAY        = 5000       # controls the rate of exponential decay of epsilon, higher means a slower decay
 TARGET_UPDATE    = 10          # episodes between target-network syncs
-N_EPISODES       = 300
+N_EPISODES       = 400
 MAX_STEPS        = 200         # Pendulum truncates at 200 steps
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -97,7 +97,7 @@ def train_step(
     target_net: QNetwork,
     memory: ReplayBuffer,
     optimizer: optim.Optimizer,
-) -> float: # returns the loss value for logging
+) -> float:
     # Don't train until we have at least 64 transitions stored
     if len(memory) < BATCH_SIZE:
         return 0.0
@@ -137,8 +137,13 @@ def epsilon(step: int) -> float:
 
 def make_action_map(n: int = N_ACTIONS, low: float = -2.0, high: float = 2.0) -> np.ndarray:
     """Return an array of n evenly-spaced torque values in [low, high]."""
-    return np.linspace(low, high, n)
+    return np.linspace(low, high, n) # [-2.0, -1.6, -1.2, -0.8, -0.4, 0.0, 0.4, 0.8, 1.2, 1.6, 2.0]
 
+def eval_q_values(q_net: QNetwork, eval_states: np.ndarray) -> float:
+    """Mean max Q-value over a fixed set of states sampled from the environment. Used for logging."""
+    with torch.no_grad():
+        s = torch.tensor(eval_states, dtype=torch.float32, device=DEVICE)
+        return q_net(s).max(dim=1)[0].mean().item() # mean of the max Q-values for each state
 
 def run_standard_dqn(n_episodes: int = N_EPISODES, n_actions: int = N_ACTIONS, seed: int = SEED):
     """Train a DQN agent on Pendulum-v1 using a hard-coded action grid."""
@@ -168,11 +173,15 @@ def run_standard_dqn(n_episodes: int = N_EPISODES, n_actions: int = N_ACTIONS, s
     buffer    = ReplayBuffer(BUFFER_SIZE)
 
     episode_rewards = []
+    # pre-collect probe states before training so every eval checkpoint uses the same 20 states
+    eval_states = np.array([env.reset()[0] for _ in range(20)])
+    eval_q_log  = []
     step_count = 0
 
     for ep in range(n_episodes):
         state, _ = env.reset()
         total_reward = 0.0
+
 
         for _ in range(MAX_STEPS):
             eps    = epsilon(step_count)
@@ -196,6 +205,9 @@ def run_standard_dqn(n_episodes: int = N_EPISODES, n_actions: int = N_ACTIONS, s
 
         episode_rewards.append(total_reward)
 
+        if (ep + 1) % 10 == 0:
+            eval_q_log.append((ep + 1, eval_q_values(q_net, eval_states)))
+
         if (ep + 1) % TARGET_UPDATE == 0: # update the target network to match the current Q-network
             target_net.load_state_dict(q_net.state_dict())
 
@@ -204,7 +216,7 @@ def run_standard_dqn(n_episodes: int = N_EPISODES, n_actions: int = N_ACTIONS, s
             print(f"  Episode {ep + 1:4d} | Avg reward (last 50): {avg:8.2f} | eps: {epsilon(step_count):.3f}")
 
     env.close()
-    return episode_rewards, q_net, action_map
+    return episode_rewards, eval_q_log, q_net, action_map
 
 
 def run_multiple_seeds(
@@ -217,20 +229,22 @@ def run_multiple_seeds(
     all_rewards shape: (n_seeds, n_episodes)
     best_q_net: the trained network from the first seed (used for GIF recording)
     """
-    all_rewards = []
+    all_rewards     = []
+    all_eval_q_logs = []
     best_q_net      = None
     best_action_map = None
     best_score      = -float("inf")
     for s in seeds:
-        rewards, q_net, action_map = run_standard_dqn(n_episodes=n_episodes, n_actions=n_actions, seed=s)
+        rewards, eval_q_log, q_net, action_map = run_standard_dqn(n_episodes=n_episodes, n_actions=n_actions, seed=s)
         all_rewards.append(rewards)
+        all_eval_q_logs.append(eval_q_log)
         score = np.mean(rewards[-50:])  # avg reward over last 50 episodes
         if score > best_score:
             best_score      = score
             best_q_net      = q_net
             best_action_map = action_map
     print(f"\nBest seed avg reward (last 50 eps): {best_score:.2f}")
-    return np.array(all_rewards), best_q_net, best_action_map
+    return np.array(all_rewards), all_eval_q_logs, best_q_net, best_action_map
 
 
 # Plotting utility
@@ -287,6 +301,33 @@ def plot_results(all_rewards: np.ndarray, window: int = 20):
     plt.show()
 
 
+def plot_q_values(all_eval_q_logs: list):
+    """Plot mean max Q-value evolution over training, averaged across seeds."""
+    # all_eval_q_logs: list of (n_seeds) lists, each a list of (episode, q_val) tuples
+    episodes = [ep for ep, _ in all_eval_q_logs[0]]
+    q_matrix = np.array([[q for _, q in log] for log in all_eval_q_logs])  # (n_seeds, n_checkpoints)
+
+    mean_q = np.mean(q_matrix, axis=0)
+    min_q  = np.min(q_matrix, axis=0)
+    max_q  = np.max(q_matrix, axis=0)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.fill_between(episodes, min_q, max_q, alpha=0.2, color="darkorange", label="min/max range")
+    ax.plot(episodes, mean_q, color="darkorange", linewidth=2, label="mean max Q-value")
+
+    ax.set_title(f"Q-value Evolution ({len(all_eval_q_logs)} seeds)")
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Mean Max Q-value (fixed eval states)")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    plt.suptitle("DQN on Pendulum-v1", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig("dqn_q_values.png", dpi=150)
+    print("Plot saved to dqn_q_values.png")
+    plt.show()
+
+
 def record_gif(
     q_net: QNetwork,
     action_map: np.ndarray,
@@ -322,9 +363,10 @@ def record_gif(
 # Entry point
 
 if __name__ == "__main__":
-    all_rewards, q_net, action_map = run_multiple_seeds(seeds=SEEDS, n_episodes=N_EPISODES, n_actions=N_ACTIONS)
+    all_rewards, all_eval_q_logs, q_net, action_map = run_multiple_seeds(seeds=SEEDS, n_episodes=N_EPISODES, n_actions=N_ACTIONS)
 
     plot_results(all_rewards)
+    plot_q_values(all_eval_q_logs)
 
     # Final summary (mean over seeds, last 50 episodes)
     print("\n--- Final performance (last 50 episodes, mean across seeds) ---")
