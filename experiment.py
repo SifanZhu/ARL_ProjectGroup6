@@ -1,11 +1,9 @@
-# experiment.py
-
 import os
 
 import gymnasium as gym
 import numpy as np
 import matplotlib.pyplot as plt
-import torch
+import torch as th
 
 from stable_baselines3 import DQN, SAC, TD3
 from stable_baselines3.common.monitor import Monitor
@@ -23,61 +21,44 @@ TOTAL_TIMESTEPS = 100_000
 EVAL_FREQ = 2_000
 
 LOG_DIR_BASE = "./logs"
+PLOT_DIR = "./plots"
 
 N_REFERENCE_STATES = 20
-REFERENCE_SEED = 0
 
 
 RUNS = [
-    ("DQN_CartPole", DQN, "CartPole-v1"),
-    ("DQN_PendulumDiscrete", DQN, "PendulumDiscrete-v1"),
-    ("SAC_Pendulum", SAC, "Pendulum-v1"),
-    ("TD3_Pendulum", TD3, "Pendulum-v1"),
+    ("DQN", DQN, "CartPole-v1"),
+    ("DQN_DiscretePendulum", DQN, "PendulumDiscrete-v1"),
+    ("SAC", SAC, "Pendulum-v1"),
+    ("TD3", TD3, "Pendulum-v1"),
 ]
+
+os.makedirs(PLOT_DIR, exist_ok=True)
 
 
 # ============================================================
 # Environment
 # ============================================================
 
-def make_monitor_env(env_id, log_dir):
-
+def make_logged_env(env_id, log_dir):
     env = make_env(env_id)
-
-    os.makedirs(log_dir, exist_ok=True)
-
     return Monitor(env, log_dir)
 
 
-# ============================================================
-# Reference states
-# ============================================================
-
-def collect_reference_states(
-    env_id,
-    n_states=N_REFERENCE_STATES,
-    seed=REFERENCE_SEED,
-):
+def collect_reference_states(env_id, n_states=N_REFERENCE_STATES, seed=0):
     """
-    Collect a fixed set of states.
-
-    These states are used throughout training so that changes
-    in the Q-value are attributable to learning rather than
-    changing evaluation states.
+    Collect a fixed set of states used for Q-value logging.
     """
 
     env = make_env(env_id)
 
     states = []
-
     obs, _ = env.reset(seed=seed)
 
     for _ in range(n_states):
-
         states.append(obs.copy())
 
         action = env.action_space.sample()
-
         obs, _, terminated, truncated, _ = env.step(action)
 
         if terminated or truncated:
@@ -92,38 +73,16 @@ def collect_reference_states(
 # Training
 # ============================================================
 
-def train(
-    algo_name,
-    algo_cls,
-    env_id,
-    timesteps=TOTAL_TIMESTEPS,
-):
+def train(algo_name, algo_cls, env_id, timesteps=TOTAL_TIMESTEPS):
 
-    log_dir = os.path.join(
-        LOG_DIR_BASE,
-        f"{algo_name}_{env_id}",
-    )
-
+    log_dir = f"{LOG_DIR_BASE}/{algo_name}_{env_id}"
     os.makedirs(log_dir, exist_ok=True)
 
-    # Training environment
-    env = make_monitor_env(
-        env_id,
-        log_dir,
-    )
+    env = make_logged_env(env_id, log_dir)
+    eval_env = make_logged_env(env_id, log_dir + "_eval")
 
-    # Evaluation environment
-    eval_env = make_monitor_env(
-        env_id,
-        log_dir + "_eval",
-    )
+    reference_states = collect_reference_states(env_id)
 
-    # Fixed reference states
-    reference_states = collect_reference_states(
-        env_id
-    )
-
-    # Reward evaluation
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=log_dir,
@@ -133,34 +92,20 @@ def train(
         deterministic=True,
     )
 
-    # Q-value logging
     q_callback = QValueLoggingCallback(
-        reference_states=reference_states,
-        log_dir=log_dir,
+        reference_states,
+        log_dir,
         log_freq=EVAL_FREQ,
     )
 
-    # Train
-    model = algo_cls(
-        "MlpPolicy",
-        env,
-        verbose=0,
-    )
+    model = algo_cls("MlpPolicy", env, verbose=0)
 
     model.learn(
         total_timesteps=timesteps,
-        callback=[
-            eval_callback,
-            q_callback,
-        ],
+        callback=[eval_callback, q_callback],
     )
 
-    model.save(
-        os.path.join(
-            log_dir,
-            "final_model",
-        )
-    )
+    model.save(f"{log_dir}/final_model")
 
     env.close()
     eval_env.close()
@@ -169,211 +114,79 @@ def train(
 
 
 # ============================================================
-# Reward evaluation
+# Reward evaluation / plotting
 # ============================================================
 
 def load_eval_results(log_dir):
-
-    data = np.load(
-        os.path.join(
-            log_dir,
-            "evaluations.npz",
-        )
-    )
+    data = np.load(f"{log_dir}/evaluations.npz")
 
     timesteps = data["timesteps"]
-
     mean_rewards = data["results"].mean(axis=1)
 
     return timesteps, mean_rewards
 
 
-# ============================================================
-# Reward visualization
-# ============================================================
-
 def plot_reward_curves(log_dirs):
 
-    plt.figure(figsize=(9, 5))
+    plt.figure(figsize=(8, 5))
 
     for log_dir, label in log_dirs:
-
         x, y = load_eval_results(log_dir)
-
-        plt.plot(
-            x,
-            y,
-            label=label,
-        )
+        plt.plot(x, y, label=label)
 
     plt.xlabel("Timesteps")
     plt.ylabel("Mean Evaluation Reward")
-    plt.title("Deterministic Evaluation Reward")
+    plt.title("Deterministic Evaluation Reward Curves")
     plt.legend()
     plt.tight_layout()
 
     plt.savefig(
-        "reward_curves.png",
+        f"{PLOT_DIR}/reward_curves.png",
         dpi=150,
     )
-
-    plt.show()
+    plt.close()
 
 
 # ============================================================
-# Q-value visualization
+# Q-value plotting
 # ============================================================
 
 def plot_q_value_curves(log_dirs):
 
-    plt.figure(figsize=(9, 5))
+    plt.figure(figsize=(8, 5))
 
     for log_dir, label in log_dirs:
-
         x, y = load_q_values(log_dir)
-
-        plt.plot(
-            x,
-            y,
-            label=label,
-        )
+        plt.plot(x, y, label=label)
 
     plt.xlabel("Timesteps")
-    plt.ylabel("Mean Q-value")
-    plt.title(
-        "Q-value Evolution on Fixed Reference States"
-    )
+    plt.ylabel("Estimated Q-Value")
+    plt.title("Q-Value Evolution")
     plt.legend()
     plt.tight_layout()
 
     plt.savefig(
-        "q_value_curves.png",
+        f"{PLOT_DIR}/q_values.png",
         dpi=150,
     )
-
-    plt.show()
+    plt.close()
 
 
 # ============================================================
-# Q-FUNCTION VISUALIZATION
+# Monte-Carlo Q-value baseline
 # ============================================================
 
-def extract_q_values_dqn(model, states):
+@th.no_grad()
+def get_q_values_dqn(model, obs):
+    """
+    Return Q(s,a) for all discrete actions.
+    """
 
-    states_tensor, _ = model.policy.obs_to_tensor(states)
-
-    with torch.no_grad():
-
-        q_values = model.q_net(states_tensor)
+    obs_tensor, _ = model.policy.obs_to_tensor(obs)
+    q_values = model.q_net(obs_tensor)
 
     return q_values.cpu().numpy()
 
-
-def plot_dqn_q_function(
-    model,
-    states,
-    title,
-):
-    """
-    Visualize Q(s,a) for individual reference states.
-
-    x-axis: discrete action
-    y-axis: Q-value
-
-    One curve = one state.
-    """
-
-    q_values = extract_q_values_dqn(
-        model,
-        states,
-    )
-
-    plt.figure(figsize=(9, 5))
-
-    for i in range(len(states)):
-
-        plt.plot(
-            np.arange(q_values.shape[1]),
-            q_values[i],
-            marker="o",
-            alpha=0.6,
-            label=f"state {i}",
-        )
-
-    plt.xlabel("Discrete Action")
-    plt.ylabel("Q(s, a)")
-    plt.title(title)
-
-    plt.tight_layout()
-    plt.savefig(
-        "dqn_q_function.png",
-        dpi=150,
-    )
-
-    plt.show()
-
-
-# ============================================================
-# Q-FUNCTION EVOLUTION
-# ============================================================
-
-def compare_q_function_checkpoints(
-    model_cls,
-    model_path_template,
-    states,
-    checkpoints,
-):
-    """
-    Plot how Q(s,a) changes during training.
-
-    Each curve represents one training checkpoint.
-    """
-
-    plt.figure(figsize=(9, 5))
-
-    for checkpoint in checkpoints:
-
-        model = model_cls.load(
-            model_path_template.format(
-                checkpoint=checkpoint
-            )
-        )
-
-        q_values = extract_q_values_dqn(
-            model,
-            states,
-        )
-
-        # Average across states
-        mean_q = q_values.mean(axis=0)
-
-        plt.plot(
-            np.arange(len(mean_q)),
-            mean_q,
-            marker="o",
-            label=f"{checkpoint} steps",
-        )
-
-    plt.xlabel("Discrete Action")
-    plt.ylabel("Mean Q(s,a)")
-    plt.title(
-        "Q-function Evolution Across Training"
-    )
-
-    plt.legend()
-    plt.tight_layout()
-
-    plt.savefig(
-        "q_function_evolution.png",
-        dpi=150,
-    )
-
-    plt.show()
-
-
-# ============================================================
-# Monte-Carlo Q baseline
-# ============================================================
 
 def rollout_discounted_return(
     model,
@@ -382,14 +195,13 @@ def rollout_discounted_return(
     max_steps=1000,
 ):
     """
-    Generate one episode following the model's
-    deterministic policy and calculate the discounted return.
+    Run one deterministic episode and calculate
+    the discounted Monte-Carlo return.
     """
 
     obs, _ = env.reset()
 
     start_obs = obs.copy()
-
     start_action, _ = model.predict(
         obs,
         deterministic=True,
@@ -415,44 +227,14 @@ def rollout_discounted_return(
         if terminated or truncated:
             break
 
-    return (
-        start_obs,
-        start_action,
-        G,
-    )
+    return start_obs, start_action, G
 
 
-def get_dqn_q_values(
-    model,
-    obs,
-):
-
-    obs_tensor, _ = model.policy.obs_to_tensor(
-        obs
-    )
-
-    with torch.no_grad():
-
-        q_values = model.q_net(
-            obs_tensor
-        )
-
-    return q_values.cpu().numpy()
-
-
-def estimate_q_bias_dqn(
-    model,
-    env,
-    n_episodes=50,
-):
-    """
-    Compare Q(s0,a0) against the Monte-Carlo
-    discounted return from the same state/action.
-    """
+def estimate_q_bias_dqn(model, env, n_episodes=50):
 
     gamma = model.gamma
 
-    q_predictions = []
+    q_preds = []
     mc_returns = []
 
     for _ in range(n_episodes):
@@ -463,57 +245,32 @@ def estimate_q_bias_dqn(
             gamma,
         )
 
-        q_all = get_dqn_q_values(
+        q_all = get_q_values_dqn(
             model,
             s0[np.newaxis, :],
         )
 
-        q_pred = q_all[
-            0,
-            int(a0)
-        ]
+        q_pred = q_all[0, int(a0)]
 
-        q_predictions.append(q_pred)
+        q_preds.append(q_pred)
         mc_returns.append(G)
 
-    q_predictions = np.asarray(
-        q_predictions
-    )
+    q_preds = np.asarray(q_preds)
+    mc_returns = np.asarray(mc_returns)
 
-    mc_returns = np.asarray(
-        mc_returns
-    )
-
-    bias = q_predictions - mc_returns
-
-    return (
-        q_predictions,
-        mc_returns,
-        bias,
-    )
+    return q_preds, mc_returns, q_preds - mc_returns
 
 
-def plot_q_bias(
-    q_predictions,
-    mc_returns,
-    title,
-):
+def plot_q_bias(q_preds, mc_returns):
 
-    lo = min(
-        q_predictions.min(),
-        mc_returns.min(),
-    )
-
-    hi = max(
-        q_predictions.max(),
-        mc_returns.max(),
-    )
+    lo = min(q_preds.min(), mc_returns.min())
+    hi = max(q_preds.max(), mc_returns.max())
 
     plt.figure(figsize=(6, 5))
 
     plt.scatter(
         mc_returns,
-        q_predictions,
+        q_preds,
         alpha=0.6,
     )
 
@@ -525,48 +282,42 @@ def plot_q_bias(
     )
 
     plt.xlabel("Monte-Carlo Return")
-    plt.ylabel("Estimated Q-value")
-    plt.title(title)
+    plt.ylabel("Estimated Q-Value")
+    plt.title("DQN Q-Value vs Monte-Carlo Return")
     plt.legend()
-
     plt.tight_layout()
 
     plt.savefig(
-        "q_value_bias.png",
+        f"{PLOT_DIR}/q_value_bias_dqn.png",
         dpi=150,
     )
-
-    plt.show()
+    plt.close()
 
 
 # ============================================================
-# Main experiment
+# Main
 # ============================================================
 
-def main():
+if __name__ == "__main__":
 
     log_dirs = []
 
-    for name, algo_cls, env_id in RUNS:
+    # Train all configurations
+    for name, cls, env_id in RUNS:
 
-        print(
-            f"Training {name} on {env_id}..."
-        )
+        print(f"Training {name} on {env_id} ...")
 
         log_dir = train(
             name,
-            algo_cls,
+            cls,
             env_id,
         )
 
         log_dirs.append(
-            (
-                log_dir,
-                f"{name} ({env_id})",
-            )
+            (log_dir, f"{name} ({env_id})")
         )
 
-    # Reward
+    # Reward curves
     plot_reward_curves(log_dirs)
 
     # Q-value evolution
@@ -576,48 +327,27 @@ def main():
     # DQN Monte-Carlo analysis
     # --------------------------------------------------------
 
-    dqn_log_dir = (
-        f"{LOG_DIR_BASE}/"
-        f"DQN_CartPole_CartPole-v1"
+    dqn_log_dir = log_dirs[0][0]
+
+    dqn_model = DQN.load(
+        f"{dqn_log_dir}/final_model"
     )
 
-    dqn_model_path = os.path.join(
-        dqn_log_dir,
-        "final_model",
+    dqn_eval_env = make_env("CartPole-v1")
+
+    q_dqn, mc_dqn, bias_dqn = estimate_q_bias_dqn(
+        dqn_model,
+        dqn_eval_env,
     )
 
-    # This path is only illustrative; use the actual
-    # directory generated by train().
-    if os.path.exists(dqn_model_path):
+    print(
+        f"DQN mean bias = {bias_dqn.mean():.3f} "
+        f"(+ = overestimation, - = underestimation)"
+    )
 
-        model = DQN.load(
-            dqn_model_path
-        )
+    plot_q_bias(
+        q_dqn,
+        mc_dqn,
+    )
 
-        env = make_env(
-            "CartPole-v1"
-        )
-
-        q_pred, mc_return, bias = (
-            estimate_q_bias_dqn(
-                model,
-                env,
-            )
-        )
-
-        print(
-            f"DQN mean Q bias: "
-            f"{bias.mean():.3f}"
-        )
-
-        plot_q_bias(
-            q_pred,
-            mc_return,
-            "DQN Q-value vs Monte-Carlo Return",
-        )
-
-        env.close()
-
-
-if __name__ == "__main__":
-    main()
+    dqn_eval_env.close()
