@@ -28,7 +28,7 @@ N_REFERENCE_STATES = 20
 
 RUNS = [
     ("DQN", DQN, "CartPole-v1"),
-    ("DQN_DiscretePendulum", DQN, "PendulumDiscrete-v1"),
+    ("DQN", DQN, "PendulumDiscrete-v1"),
     ("SAC", SAC, "Pendulum-v1"),
     ("TD3", TD3, "Pendulum-v1"),
 ]
@@ -111,65 +111,6 @@ def train(algo_name, algo_cls, env_id, timesteps=TOTAL_TIMESTEPS):
     eval_env.close()
 
     return log_dir
-
-
-# ============================================================
-# Reward evaluation / plotting
-# ============================================================
-
-def load_eval_results(log_dir):
-    data = np.load(f"{log_dir}/evaluations.npz")
-
-    timesteps = data["timesteps"]
-    mean_rewards = data["results"].mean(axis=1)
-
-    return timesteps, mean_rewards
-
-
-def plot_reward_curves(log_dirs):
-
-    plt.figure(figsize=(8, 5))
-
-    for log_dir, label in log_dirs:
-        x, y = load_eval_results(log_dir)
-        plt.plot(x, y, label=label)
-
-    plt.xlabel("Timesteps")
-    plt.ylabel("Mean Evaluation Reward")
-    plt.title("Deterministic Evaluation Reward Curves")
-    plt.legend()
-    plt.tight_layout()
-
-    plt.savefig(
-        f"{PLOT_DIR}/reward_curves.png",
-        dpi=150,
-    )
-    plt.close()
-
-
-# ============================================================
-# Q-value plotting
-# ============================================================
-
-def plot_q_value_curves(log_dirs):
-
-    plt.figure(figsize=(8, 5))
-
-    for log_dir, label in log_dirs:
-        x, y = load_q_values(log_dir)
-        plt.plot(x, y, label=label)
-
-    plt.xlabel("Timesteps")
-    plt.ylabel("Estimated Q-Value")
-    plt.title("Q-Value Evolution")
-    plt.legend()
-    plt.tight_layout()
-
-    plt.savefig(
-        f"{PLOT_DIR}/q_values.png",
-        dpi=150,
-    )
-    plt.close()
 
 
 # ============================================================
