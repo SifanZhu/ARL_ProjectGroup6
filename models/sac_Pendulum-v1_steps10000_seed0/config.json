@@ -1,0 +1,12 @@
+{
+  "algo": "sac",
+  "env_id": "Pendulum-v1",
+  "timesteps": 10000,
+  "seed": 0,
+  "out_dir": "models",
+  "checkpoint_freq": 10000,
+  "eval_freq": 2000,
+  "n_eval_episodes": 5,
+  "policy": "MlpPolicy",
+  "algo_kwargs": null
+}
