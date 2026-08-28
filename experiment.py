@@ -258,12 +258,6 @@ if __name__ == "__main__":
             (log_dir, f"{name} ({env_id})")
         )
 
-    # Reward curves
-    plot_reward_curves(log_dirs)
-
-    # Q-value evolution
-    plot_q_value_curves(log_dirs)
-
     # --------------------------------------------------------
     # DQN Monte-Carlo analysis
     # --------------------------------------------------------
