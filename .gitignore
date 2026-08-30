@@ -1,5 +1,4 @@
 models/**/checkpoints/
-models/**/best_model.zip
 .venv
 
 /.idea
