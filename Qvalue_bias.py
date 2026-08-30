@@ -246,7 +246,7 @@ if __name__ == "__main__":
     import gymnasium as gym
     from train import DiscretizeActionWrapper
 
-    model = DQN.load("models/dqn_CartPole-v1_steps10000_seed0/final_model")
+    model = DQN.load("models/dqn_CartPole-v1_steps5000000_seed0/final_model")
     eval_env = gym.make("CartPole-v1")
 
     result = estimate_bias_over_random_states(model, eval_env, n_states=50)
@@ -257,7 +257,7 @@ if __name__ == "__main__":
     eval_env.close()
 
     # DiscretizeActionWrapper maps discrete action indices back to continuous torques
-    model_p = DQN.load("models/dqn_Pendulum-v1_steps10000_seed0/final_model")
+    model_p = DQN.load("models/dqn_Pendulum-v1_steps5000000_seed0/final_model")
     eval_env_p = DiscretizeActionWrapper(gym.make("Pendulum-v1"))
 
     result_p = estimate_bias_over_random_states(model_p, eval_env_p, n_states=50)
