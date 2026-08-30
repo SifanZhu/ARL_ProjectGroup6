@@ -10,7 +10,7 @@ CLI-Nutzung
     # Alle drei Algos, alle drei Timestep-Budgets, 1 Seed (Defaults):
     python train.py
 
-    # Nur DQN, zwei Budgets, drei Seeds:
+    # Nur DQN (auf CartPole-v1 und Pendulum-v1), zwei Budgets, drei Seeds:
     python train.py --algo dqn --timesteps 10000 100000 --seeds 0 1 2
 
     # SAC und TD3 auf einem anderen Environment:
@@ -20,10 +20,12 @@ Als Modul (z.B. aus einem Analyse-/Notebook-Skript)
 -----------------------------------------------------
     from training.train import TrainConfig, train_model, train_batch
 
+    # einzelner Run auf einem bestimmten Env:
     cfg = TrainConfig(algo="dqn", env_id="CartPole-v1", timesteps=100_000, seed=0)
     model_path = train_model(cfg)
 
-    # oder gleich mehrere Kombinationen:
+    # train_batch iteriert über DEFAULT_ENVS; dqn trainiert standardmäßig auf
+    # CartPole-v1 UND Pendulum-v1 (DiscretizeActionWrapper wird automatisch angewendet):
     results = train_batch(algos=["dqn"], timesteps_list=[10_000, 100_000], seeds=[0, 1])
 """
 
@@ -33,7 +35,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import gymnasium as gym
+from gymnasium import spaces
 from stable_baselines3 import DQN, SAC, TD3
 from stable_baselines3.common.callbacks import (
     CallbackList,
@@ -43,7 +47,8 @@ from stable_baselines3.common.callbacks import (
 from stable_baselines3.common.monitor import Monitor
 
 ALGOS = {"dqn": DQN, "sac": SAC, "td3": TD3}
-DEFAULT_ENVS = {"dqn": "CartPole-v1", "sac": "Pendulum-v1", "td3": "Pendulum-v1"}
+# DQN runs on both environments; list entries are each trained separately
+DEFAULT_ENVS = {"dqn": ["CartPole-v1", "Pendulum-v1"], "sac": "Pendulum-v1", "td3": "Pendulum-v1"}
 
 
 @dataclass
@@ -68,12 +73,31 @@ class TrainConfig:
         return Path(self.out_dir) / self.run_name
 
 
-def make_env(env_id: str, log_dir: Path, seed: int) -> Monitor:
+def make_env(env_id: str, log_dir: Path, seed: int, discretize: bool = False) -> Monitor:
     env = gym.make(env_id)
     env.reset(seed=seed)
+    if discretize:
+        env = DiscretizeActionWrapper(env)
     env = Monitor(env, str(log_dir))
     return env
 
+
+N_ACTIONS = 11  # discrete torque bins for DQN on continuous-action envs
+
+
+class DiscretizeActionWrapper(gym.ActionWrapper):
+    """Maps Discrete(N_ACTIONS) indices to evenly-spaced values in a 1-D Box action space."""
+
+    def __init__(self, env: gym.Env, n: int = N_ACTIONS):
+        super().__init__(env)
+        low  = float(env.action_space.low[0])
+        high = float(env.action_space.high[0])
+        self._action_map = np.linspace(low, high, n, dtype=np.float32)
+        self.action_space = spaces.Discrete(n)
+
+    def action(self, action: int) -> np.ndarray:
+        return np.array([self._action_map[action]], dtype=np.float32)
+    
 
 def train_model(cfg: TrainConfig) -> Path:
     """Trainiert ein einzelnes Modell gemäß cfg und speichert alles unter cfg.run_dir:
@@ -97,8 +121,12 @@ def train_model(cfg: TrainConfig) -> Path:
     (run_dir / "eval").mkdir(parents=True, exist_ok=True)
     (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
 
-    train_env = make_env(cfg.env_id, run_dir / "monitor", cfg.seed)
-    eval_env = make_env(cfg.env_id, run_dir / "eval", cfg.seed + 1000)
+    _probe = gym.make(cfg.env_id)
+    needs_discretize = cfg.algo == "dqn" and isinstance(_probe.action_space, spaces.Box)
+    _probe.close()
+
+    train_env = make_env(cfg.env_id, run_dir / "monitor", cfg.seed,       discretize=needs_discretize)
+    eval_env  = make_env(cfg.env_id, run_dir / "eval",    cfg.seed + 1000, discretize=needs_discretize)
 
     eval_callback = EvalCallback(
         eval_env,
@@ -142,23 +170,29 @@ def train_batch(
     env_overrides: Optional[Dict[str, str]] = None,
     out_dir: str = "models",
 ) -> List[Tuple[TrainConfig, Path]]:
-    """Trainiert alle Kombinationen aus algos x timesteps_list x seeds.
+    """Trainiert alle Kombinationen aus algos x timesteps_list x seeds x envs.
 
     env_overrides: optionales dict {algo: env_id}; sonst wird DEFAULT_ENVS verwendet.
+    DEFAULT_ENVS-Werte können Listen sein (z.B. dqn: [CartPole, Pendulum]) -- jedes
+    Env wird dann als eigene Dimension iteriert.
     Gibt eine Liste (TrainConfig, model_path) für jeden Run zurück.
     """
     env_overrides = env_overrides or {}
     results = []
     for algo in algos:
-        env_id = env_overrides.get(algo, DEFAULT_ENVS[algo])
-        for timesteps in timesteps_list:
-            for seed in seeds:
-                cfg = TrainConfig(
-                    algo=algo, env_id=env_id, timesteps=timesteps, seed=seed, out_dir=out_dir
-                )
-                print(f"[train] {cfg.run_name} ...")
-                model_path = train_model(cfg)
-                results.append((cfg, model_path))
+        default = DEFAULT_ENVS[algo]
+        env_ids = env_overrides.get(algo, default)
+        if isinstance(env_ids, str):
+            env_ids = [env_ids]
+        for env_id in env_ids:
+            for timesteps in timesteps_list:
+                for seed in seeds:
+                    cfg = TrainConfig(
+                        algo=algo, env_id=env_id, timesteps=timesteps, seed=seed, out_dir=out_dir
+                    )
+                    print(f"[train] {cfg.run_name} ...")
+                    model_path = train_model(cfg)
+                    results.append((cfg, model_path))
     return results
 
 

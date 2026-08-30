@@ -4,10 +4,11 @@ analysis/qvalue_bias.py
 Kombiniert zwei zusammengehörige Bausteine der Q-Funktions-Analyse:
 
   1. Q-Wert-Extraktion aus einem trainierten Modell (get_q_value)
-     -> algo-agnostisch: funktioniert für DQN (diskret) UND SAC/TD3 (kontinuierlich,
-        inkl. Twin-Critics Q1/Q2/min).
+     -> algo-agnostisch: funktioniert für DQN (diskret, z.B. CartPole oder Pendulum
+        mit DiscretizeActionWrapper) UND SAC/TD3 (kontinuierlich, inkl. Twin-Critics
+        Q1/Q2/min).
 
-  2. Monte-Carlo-Schätzung des "wahren" Returns (rollout_return, monte_carlo_return,
+  2. Monte-Carlo-Schätzung des "wahren" Returns (rollout_return,
      estimate_bias_over_random_states) -> um die Netz-Vorhersage (1) gegen die
      tatsächliche Performance zu prüfen (Über-/Unterschätzung).
 
@@ -29,8 +30,15 @@ Zwei unterschiedliche MC-Anwendungsfälle sind hier bewusst getrennt:
 Nutzung
 -------
     from analysis.qvalue_bias import estimate_bias_over_random_states
+    from train import DiscretizeActionWrapper
 
+    # DQN auf CartPole (natives diskretes Action-Space):
     result = estimate_bias_over_random_states(model, env, n_states=50)
+
+    # DQN auf Pendulum (kontinuierliches Action-Space via DiscretizeActionWrapper):
+    result = estimate_bias_over_random_states(
+        model_p, DiscretizeActionWrapper(gym.make("Pendulum-v1")), n_states=50
+    )
     print(result["bias"].mean(), result["bias"].std())
 """
 
@@ -236,12 +244,25 @@ def estimate_bias_over_random_states(
 if __name__ == "__main__":
     # Kleiner Selbsttest / Beispiel-Aufruf, analog zum alten Skript.
     import gymnasium as gym
+    from train import DiscretizeActionWrapper
 
     model = DQN.load("models/dqn_CartPole-v1_steps10000_seed0/final_model")
     eval_env = gym.make("CartPole-v1")
 
     result = estimate_bias_over_random_states(model, eval_env, n_states=50)
     print(
-        f"DQN: mean bias = {result['bias'].mean():.3f} "
+        f"DQN CartPole: mean bias = {result['bias'].mean():.3f} "
         f"(+ = Überschätzung, - = Unterschätzung), std = {result['bias'].std():.3f}"
     )
+    eval_env.close()
+
+    # DiscretizeActionWrapper maps discrete action indices back to continuous torques
+    model_p = DQN.load("models/dqn_Pendulum-v1_steps10000_seed0/final_model")
+    eval_env_p = DiscretizeActionWrapper(gym.make("Pendulum-v1"))
+
+    result_p = estimate_bias_over_random_states(model_p, eval_env_p, n_states=50)
+    print(
+        f"DQN Pendulum: mean bias = {result_p['bias'].mean():.3f} "
+        f"(+ = Überschätzung, - = Unterschätzung), std = {result_p['bias'].std():.3f}"
+    )
+    eval_env_p.close()
