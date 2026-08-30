@@ -1,4 +1,4 @@
 models/**/checkpoints/
 .venv
 
-/.idea
+.idea
