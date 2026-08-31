@@ -27,6 +27,7 @@ Two building blocks per run:
 Output: results/model_evaluation.csv + one plot per algo/env in results/.
 """
 
+import argparse
 import csv
 import json
 from pathlib import Path
@@ -297,6 +298,39 @@ def plot_collapse_signal_vs_noise(rows: list[dict], out_path: Path) -> None:
     plt.close(fig)
 
 
+def plot_bias_consistency(rows: list[dict], out_path: Path) -> None:
+    """Finding: bias_std shows a different kind of instability than bias
+    direction/magnitude.
+    """
+    groups = [
+        ("dqn", "CartPole-v1", "DQN / CartPole"),
+        ("dqn", "Pendulum-v1", "DQN / Pendulum"),
+        ("sac", "Pendulum-v1", "SAC / Pendulum"),
+        ("td3", "Pendulum-v1", "TD3 / Pendulum"),
+    ]
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    for algo, env_id, label in groups:
+        group_rows = sorted(
+            (r for r in rows if r["algo"] == algo and r["env_id"] == env_id and r["variant"] == "new"),
+            key=lambda r: r["timesteps"],
+        )
+        if not group_rows:
+            continue
+        budgets = [r["timesteps"] for r in group_rows]
+        bias_std = [r["bias_std"] for r in group_rows]
+        ax.plot(budgets, bias_std, marker="o", label=label)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Training budget (timesteps, log scale)")
+    ax.set_ylabel("bias_std across sampled states (log scale)")
+    ax.set_title("Consistency of the Q-value miscalibration:\nsystematic (low) vs. erratic (high) across states")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
 def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
     """Finding: the 5M-step DQN/CartPole run never stabilizes, it hits a
     perfect score as late as ~2M steps, then crashes and keeps oscillating
@@ -319,6 +353,31 @@ def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
+def load_rows_from_csv(csv_path: Path, models_dir: Path) -> list[dict]:
+    """Lets plots be regenerated/added without rerunning the
+    expensive bias_stats/collapse_check computation.
+    """
+    int_fields = {"timesteps", "seed", "peak_timestep", "final_timestep", "best_saved_at_timesteps"}
+    str_fields = {"run_name", "variant", "algo", "env_id"}
+
+    rows = []
+    with open(csv_path) as f:
+        for raw in csv.DictReader(f):
+            row = {}
+            for key, value in raw.items():
+                if key in str_fields:
+                    row[key] = value
+                elif key in int_fields:
+                    row[key] = int(value) if value not in ("", "None") else None
+                else:
+                    row[key] = float(value) if value not in ("", "None") else float("nan")
+
+            npz_path = models_dir / row["run_name"] / "eval" / "evaluations.npz"
+            data = np.load(npz_path)
+            row["eval_timesteps"] = data["timesteps"]
+            row["eval_means"] = data["results"].mean(axis=1)
+            rows.append(row)
+    return rows
 
 def print_summary(rows: list[dict]) -> None:
     by_group: dict[tuple[str, str], list[dict]] = {}
@@ -349,21 +408,37 @@ def print_summary(rows: list[dict]) -> None:
                 )
 
 
-def main() -> None:
-    RESULTS_DIR.mkdir(exist_ok=True)
-
-    run_dirs = sorted(p.parent for p in MODELS_DIR.glob("*/config.json"))
-    rows = [evaluate_run(run_dir) for run_dir in run_dirs]
-
-    write_csv(rows, RESULTS_DIR / "model_evaluation.csv")
-
+def make_plots(rows: list[dict]) -> None:
     plot_cartpole_old_vs_new(rows, RESULTS_DIR / "finding_cartpole_old_vs_new.png")
     plot_bias_direction(rows, RESULTS_DIR / "finding_bias_direction_cartpole_vs_pendulum.png")
     plot_collapse_signal_vs_noise(rows, RESULTS_DIR / "finding_collapse_signal_vs_noise.png")
     plot_cartpole_5M_oscillation(rows, RESULTS_DIR / "finding_cartpole_5M_oscillation.png")
+    plot_bias_consistency(rows, RESULTS_DIR / "finding_bias_consistency.png")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--plots-only", action="store_true",
+        help="Skip model loading/MC rollouts, regenerate plots from the existing "
+             "results/model_evaluation.csv (+ cheap evaluations.npz reads) instead.",
+    )
+    args = parser.parse_args()
+
+    RESULTS_DIR.mkdir(exist_ok=True)
+    csv_path = RESULTS_DIR / "model_evaluation.csv"
+
+    if args.plots_only:
+        rows = load_rows_from_csv(csv_path, MODELS_DIR)
+    else:
+        run_dirs = sorted(p.parent for p in MODELS_DIR.glob("*/config.json"))
+        rows = [evaluate_run(run_dir) for run_dir in run_dirs]
+        write_csv(rows, csv_path)
+
+    make_plots(rows)
 
     print_summary(rows)
-    print(f"\nCSV: {RESULTS_DIR / 'model_evaluation.csv'}")
+    print(f"\nCSV: {csv_path}")
     print(f"Plots: {RESULTS_DIR}/*.png")
 
 
