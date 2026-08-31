@@ -34,10 +34,12 @@ from pathlib import Path
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
+from gymnasium import spaces
 from stable_baselines3 import DQN, SAC, TD3
 from stable_baselines3.common.evaluation import evaluate_policy
 
 from Qvalue_bias import estimate_bias_over_random_states
+from train import DiscretizeActionWrapper
 
 ALGOS = {"dqn": DQN, "sac": SAC, "td3": TD3}
 
@@ -75,9 +77,21 @@ def eval_curve_stats(eval_npz_path: Path) -> dict:
     }
 
 
+def make_analysis_env(algo: str, env_id: str) -> gym.Env:
+    """Builds an env matching how the model was actually trained. DQN on a
+    continuous-action env (Pendulum) was trained through DiscretizeActionWrapper
+    (see train.py), so bias/re-eval must use the same wrapper or actions
+    won't match what the network expects.
+    """
+    env = gym.make(env_id)
+    if algo == "dqn" and isinstance(env.action_space, spaces.Box):
+        env = DiscretizeActionWrapper(env)
+    return env
+
+
 def bias_stats(algo: str, env_id: str, run_dir: Path) -> dict:
     model = ALGOS[algo].load(run_dir / "final_model")
-    env = gym.make(env_id)
+    env = make_analysis_env(algo, env_id)
     env.reset(seed=BIAS_SEED)
 
     result = estimate_bias_over_random_states(model, env, n_states=BIAS_N_STATES)
@@ -106,7 +120,7 @@ def re_evaluate(algo: str, env_id: str, model_path: Path) -> dict:
     a free cross-check against the peak_timestep read from evaluations.npz.
     """
     model = ALGOS[algo].load(model_path)
-    env = gym.make(env_id)
+    env = make_analysis_env(algo, env_id)
     env.reset(seed=RE_EVAL_SEED)
 
     mean_reward, std_reward = evaluate_policy(
@@ -162,6 +176,9 @@ def evaluate_run(run_dir: Path) -> dict:
 
     row = {
         "run_name": run_dir.name,
+        # "_old" runs share the exact same (algo, env_id, timesteps) as the
+        # current ones (retrained on main with identical config)
+        "variant": "old" if run_dir.name.endswith("_old") else "new",
         "algo": config["algo"],
         "env_id": config["env_id"],
         "timesteps": config["timesteps"],
@@ -175,7 +192,7 @@ def evaluate_run(run_dir: Path) -> dict:
 
 def write_csv(rows: list[dict], path: Path) -> None:
     fieldnames = [
-        "run_name", "algo", "env_id", "timesteps", "seed",
+        "run_name", "variant", "algo", "env_id", "timesteps", "seed",
         "peak_timestep", "peak_mean", "final_timestep", "final_mean",
         "degradation", "degradation_pct", "curve_std",
         "bias_mean", "bias_std", "relative_bias", "q_pred_mean", "mc_return_mean",
@@ -190,13 +207,16 @@ def write_csv(rows: list[dict], path: Path) -> None:
 
 
 def plot_algo(algo: str, env_id: str, rows: list[dict], out_path: Path) -> None:
-    rows = sorted(rows, key=lambda r: r["timesteps"])
+    rows = sorted(rows, key=lambda r: (r["variant"], r["timesteps"]))
     fig, (ax_curve, ax_bias) = plt.subplots(1, 2, figsize=(11, 4))
 
     for row in rows:
+        variant_suffix = f" [{row['variant']}]" if row["variant"] != "new" else ""
+        curve_linestyle = "--" if row["variant"] == "old" else "-"
         ax_curve.plot(
             row["eval_timesteps"], row["eval_means"],
-            label=f"budget={row['timesteps']}",
+            label=f"budget={row['timesteps']}{variant_suffix}",
+            linestyle=curve_linestyle,
         )
         ax_curve.scatter([row["peak_timestep"]], [row["peak_mean"]], marker="^", color="green")
         ax_curve.scatter([row["final_timestep"]], [row["final_mean"]], marker="x", color="red")
@@ -224,12 +244,6 @@ def plot_algo(algo: str, env_id: str, rows: list[dict], out_path: Path) -> None:
     ]
     ax_curve.legend(handles=handles, fontsize=7)
 
-    budgets = [r["timesteps"] for r in rows]
-    bias_means = [r["bias_mean"] for r in rows]
-    bias_stds = [r["bias_std"] for r in rows]
-    relative_bias = [r["relative_bias"] for r in rows]
-
-    ax_bias.errorbar(budgets, bias_means, yerr=bias_stds, marker="o", capsize=4, color="C0")
     ax_bias.axhline(0, color="gray", linewidth=0.8, linestyle="--")
     ax_bias.set_xscale("log")
     ax_bias.set_title(f"{algo.upper()} / {env_id}: Q-Wert-Bias über Trainings-Budgets")
@@ -241,10 +255,32 @@ def plot_algo(algo: str, env_id: str, rows: list[dict], out_path: Path) -> None:
     # return scale itself changes a lot (untrained vs. maxed-out model),
     # therefore also show relative_bias (bias / mc_return_mean) as a second axis
     ax_bias_rel = ax_bias.twinx()
-    ax_bias_rel.plot(budgets, relative_bias, marker="s", linestyle="--", color="C1")
     ax_bias_rel.set_ylabel("Relative bias (bias / mc_return_mean)", color="C1")
     ax_bias_rel.tick_params(axis="y", labelcolor="C1")
     ax_bias_rel.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
+
+    variants_present = sorted({r["variant"] for r in rows}, key=lambda v: v != "new")
+    for variant, marker, bias_linestyle in zip(variants_present, ["o", "v"], ["-", "--"]):
+        variant_rows = [r for r in rows if r["variant"] == variant]
+        budgets = [r["timesteps"] for r in variant_rows]
+        bias_means = [r["bias_mean"] for r in variant_rows]
+        bias_stds = [r["bias_std"] for r in variant_rows]
+        relative_bias = [r["relative_bias"] for r in variant_rows]
+        suffix = "" if variant == "new" else f" [{variant}]"
+
+        ax_bias.errorbar(
+            budgets, bias_means, yerr=bias_stds, marker=marker, linestyle=bias_linestyle,
+            capsize=4, color="C0", label=f"bias{suffix}",
+        )
+        ax_bias_rel.plot(
+            budgets, relative_bias, marker=marker, linestyle=bias_linestyle,
+            color="C1", label=f"relative_bias{suffix}",
+        )
+
+    if len(variants_present) > 1:
+        lines1, labels1 = ax_bias.get_legend_handles_labels()
+        lines2, labels2 = ax_bias_rel.get_legend_handles_labels()
+        ax_bias.legend(lines1 + lines2, labels1 + labels2, fontsize=7)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -252,16 +288,17 @@ def plot_algo(algo: str, env_id: str, rows: list[dict], out_path: Path) -> None:
 
 
 def print_summary(rows: list[dict]) -> None:
-    by_algo: dict[str, list[dict]] = {}
+    by_group: dict[tuple[str, str], list[dict]] = {}
     for row in rows:
-        by_algo.setdefault(row["algo"], []).append(row)
+        by_group.setdefault((row["algo"], row["env_id"]), []).append(row)
 
-    for algo, algo_rows in by_algo.items():
-        algo_rows = sorted(algo_rows, key=lambda r: r["timesteps"])
-        print(f"\n=== {algo.upper()} ({algo_rows[0]['env_id']}) ===")
-        for row in algo_rows:
+    for (algo, env_id), group_rows in by_group.items():
+        group_rows = sorted(group_rows, key=lambda r: (r["variant"], r["timesteps"]))
+        print(f"\n=== {algo.upper()} ({env_id}) ===")
+        for row in group_rows:
+            variant_suffix = f" [{row['variant']}]" if row["variant"] != "new" else ""
             print(
-                f"  steps={row['timesteps']:>8} | "
+                f"  steps={row['timesteps']:>8}{variant_suffix} | "
                 f"peak={row['peak_mean']:8.1f}@{row['peak_timestep']:<7} "
                 f"final={row['final_mean']:8.1f} "
                 f"degradation={row['degradation']:+7.1f} ({row['degradation_pct']:+.1%}) | "
