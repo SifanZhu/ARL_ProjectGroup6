@@ -209,7 +209,7 @@ def parse_args() -> argparse.Namespace:
         help="Environment-ID; überschreibt für ALLE gewählten Algos die Default-Envs.",
     )
     parser.add_argument(
-        "--timesteps", type=int, nargs="+", default=[10_000, 100_000, 1_000_000],
+        "--timesteps", type=int, nargs="+", default=[10_000, 100_000, 1_000_000, 5_000_000],
         help="Liste der Timestep-Budgets, z.B. --timesteps 10000 100000 1000000",
     )
     parser.add_argument(
