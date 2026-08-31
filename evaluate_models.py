@@ -206,82 +206,115 @@ def write_csv(rows: list[dict], path: Path) -> None:
         writer.writerows(rows)
 
 
-def plot_algo(algo: str, env_id: str, rows: list[dict], out_path: Path) -> None:
-    rows = sorted(rows, key=lambda r: (r["variant"], r["timesteps"]))
-    fig, (ax_curve, ax_bias) = plt.subplots(1, 2, figsize=(11, 4))
+def plot_cartpole_old_vs_new(rows: list[dict], out_path: Path) -> None:
+    """Finding: two DQN/CartPole runs with byte-identical seed/config diverge
+    sharply at 1M steps.
+    """
+    cp_rows = [r for r in rows if r["algo"] == "dqn" and r["env_id"] == "CartPole-v1"
+               and r["variant"] in ("old", "new")]
+    budgets = sorted({r["timesteps"] for r in cp_rows if r["timesteps"] <= 1_000_000})
+    if not budgets:
+        return
 
-    for row in rows:
-        variant_suffix = f" [{row['variant']}]" if row["variant"] != "new" else ""
-        curve_linestyle = "--" if row["variant"] == "old" else "-"
-        ax_curve.plot(
-            row["eval_timesteps"], row["eval_means"],
-            label=f"budget={row['timesteps']}{variant_suffix}",
-            linestyle=curve_linestyle,
+    fig, axes = plt.subplots(1, len(budgets), figsize=(4.2 * len(budgets), 4), sharey=True)
+    if len(budgets) == 1:
+        axes = [axes]
+
+    for ax, budget in zip(axes, budgets):
+        for variant, color in [("new", "C0"), ("old", "C1")]:
+            row = next((r for r in cp_rows if r["timesteps"] == budget and r["variant"] == variant), None)
+            if row is None:
+                continue
+            ax.plot(row["eval_timesteps"], row["eval_means"], label=variant, color=color)
+        ax.set_title(f"{budget:,} steps")
+        ax.set_xlabel("Timesteps")
+        ax.legend(fontsize=8)
+    axes[0].set_ylabel("Mean eval reward (n=5, training-time)")
+    fig.suptitle("DQN/CartPole: old vs. retrained run -- same seed, same config.json")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_bias_direction(rows: list[dict], out_path: Path) -> None:
+    """Finding: DQN's Q-value bias direction is opposite on CartPole
+    (underestimates for most of training) vs. Pendulum (overestimates for
+    most of training).
+    """
+    groups = [("dqn", "CartPole-v1", "DQN / CartPole"), ("dqn", "Pendulum-v1", "DQN / Pendulum")]
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    for algo, env_id, label in groups:
+        group_rows = sorted(
+            (r for r in rows if r["algo"] == algo and r["env_id"] == env_id and r["variant"] == "new"),
+            key=lambda r: r["timesteps"],
         )
-        ax_curve.scatter([row["peak_timestep"]], [row["peak_mean"]], marker="^", color="green")
-        ax_curve.scatter([row["final_timestep"]], [row["final_mean"]], marker="x", color="red")
-        # independent re-evaluation (n=RE_EVAL_N_EPISODES, fresh seed) at the same
-        # x-position, if these disagree a lot with the training-time markers
-        # above, the recorded peak/final gap is likely eval-sampling noise.
-        if not np.isnan(row["best_reeval_mean"]):
-            ax_curve.scatter(
-                [row["peak_timestep"]], [row["best_reeval_mean"]],
-                marker="D", color="darkgreen", zorder=5,
-            )
-            ax_curve.scatter(
-                [row["final_timestep"]], [row["final_reeval_mean"]],
-                marker="P", color="darkred", zorder=5,
-            )
-    ax_curve.set_title(f"{algo.upper()} / {env_id}: Eval-Reward-Kurven")
-    ax_curve.set_xlabel("Timesteps")
-    ax_curve.set_ylabel("Mean eval reward")
-    handles, labels = ax_curve.get_legend_handles_labels()
-    handles += [
-        plt.Line2D([], [], marker="^", color="green", linestyle="", label="peak (n=5, training eval)"),
-        plt.Line2D([], [], marker="x", color="red", linestyle="", label="final (n=5, training eval)"),
-        plt.Line2D([], [], marker="D", color="darkgreen", linestyle="", label=f"best_model re-eval (n={RE_EVAL_N_EPISODES})"),
-        plt.Line2D([], [], marker="P", color="darkred", linestyle="", label=f"final_model re-eval (n={RE_EVAL_N_EPISODES})"),
+        if not group_rows:
+            continue
+        budgets = [r["timesteps"] for r in group_rows]
+        rel_bias = [r["relative_bias"] for r in group_rows]
+        ax.plot(budgets, rel_bias, marker="o", label=label)
+
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    ax.set_xscale("log")
+    ax.set_xlabel("Training budget (timesteps, log scale)")
+    ax.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
+    ax.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
+    ax.set_title("DQN bias direction: overestimation (Pendulum) vs.\nunderestimation (CartPole) are the same algorithm")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_collapse_signal_vs_noise(rows: list[dict], out_path: Path) -> None:
+    """Finding: most recorded peak-to-final collapses (SAC/TD3, and DQN's
+    own training curve in several cases) turn out to be eval-sampling noise
+    once independently re-evaluated with n=50 instead of the training-time
+    n=5. Only one run (DQN/CartPole 1M, new) survives as a real gap.
+    """
+    candidates = [r for r in rows if not np.isnan(r["reeval_degradation_sem_ratio"])]
+    if not candidates:
+        return
+    candidates = sorted(candidates, key=lambda r: abs(r["reeval_degradation_sem_ratio"]))
+
+    labels = [
+        f"{r['algo']}/{r['env_id']} {r['timesteps']:,}" + ("" if r["variant"] == "new" else f" [{r['variant']}]")
+        for r in candidates
     ]
-    ax_curve.legend(handles=handles, fontsize=7)
+    values = [r["reeval_degradation_sem_ratio"] for r in candidates]
+    colors = ["crimson" if abs(v) >= 2 else "gray" for v in values]
 
-    ax_bias.axhline(0, color="gray", linewidth=0.8, linestyle="--")
-    ax_bias.set_xscale("log")
-    ax_bias.set_title(f"{algo.upper()} / {env_id}: Q-Wert-Bias über Trainings-Budgets")
-    ax_bias.set_xlabel("Timesteps (log)")
-    ax_bias.set_ylabel("Bias (Q_pred - MC_return)", color="C0")
-    ax_bias.tick_params(axis="y", labelcolor="C0")
+    fig, ax = plt.subplots(figsize=(7, max(4, 0.4 * len(candidates))))
+    ax.barh(labels, values, color=colors)
+    ax.axvline(2, color="crimson", linestyle="--", linewidth=0.8)
+    ax.axvline(-2, color="crimson", linestyle="--", linewidth=0.8)
+    ax.axvline(0, color="black", linewidth=0.8)
+    ax.set_xlabel("best_model vs. final_model re-eval gap, in SEMs\n(beyond ±2 = likely real, not noise)")
+    ax.set_title("Which recorded peak-to-final collapses are real?")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
 
-    # raw bias is not comparable across budgets, since the achievable
-    # return scale itself changes a lot (untrained vs. maxed-out model),
-    # therefore also show relative_bias (bias / mc_return_mean) as a second axis
-    ax_bias_rel = ax_bias.twinx()
-    ax_bias_rel.set_ylabel("Relative bias (bias / mc_return_mean)", color="C1")
-    ax_bias_rel.tick_params(axis="y", labelcolor="C1")
-    ax_bias_rel.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
 
-    variants_present = sorted({r["variant"] for r in rows}, key=lambda v: v != "new")
-    for variant, marker, bias_linestyle in zip(variants_present, ["o", "v"], ["-", "--"]):
-        variant_rows = [r for r in rows if r["variant"] == variant]
-        budgets = [r["timesteps"] for r in variant_rows]
-        bias_means = [r["bias_mean"] for r in variant_rows]
-        bias_stds = [r["bias_std"] for r in variant_rows]
-        relative_bias = [r["relative_bias"] for r in variant_rows]
-        suffix = "" if variant == "new" else f" [{variant}]"
+def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
+    """Finding: the 5M-step DQN/CartPole run never stabilizes, it hits a
+    perfect score as late as ~2M steps, then crashes and keeps oscillating
+    through the very end of training.
+    """
+    row = next(
+        (r for r in rows if r["algo"] == "dqn" and r["env_id"] == "CartPole-v1"
+         and r["timesteps"] == 5_000_000 and r["variant"] == "new"),
+        None,
+    )
+    if row is None:
+        return
 
-        ax_bias.errorbar(
-            budgets, bias_means, yerr=bias_stds, marker=marker, linestyle=bias_linestyle,
-            capsize=4, color="C0", label=f"bias{suffix}",
-        )
-        ax_bias_rel.plot(
-            budgets, relative_bias, marker=marker, linestyle=bias_linestyle,
-            color="C1", label=f"relative_bias{suffix}",
-        )
-
-    if len(variants_present) > 1:
-        lines1, labels1 = ax_bias.get_legend_handles_labels()
-        lines2, labels2 = ax_bias_rel.get_legend_handles_labels()
-        ax_bias.legend(lines1 + lines2, labels1 + labels2, fontsize=7)
-
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.plot(row["eval_timesteps"], row["eval_means"], color="C0", linewidth=0.9)
+    ax.set_xlabel("Timesteps")
+    ax.set_ylabel("Mean eval reward (n=5)")
+    ax.set_title("DQN/CartPole (5M steps): performance never stabilizes")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -324,11 +357,10 @@ def main() -> None:
 
     write_csv(rows, RESULTS_DIR / "model_evaluation.csv")
 
-    by_algo: dict[tuple[str, str], list[dict]] = {}
-    for row in rows:
-        by_algo.setdefault((row["algo"], row["env_id"]), []).append(row)
-    for (algo, env_id), algo_rows in by_algo.items():
-        plot_algo(algo, env_id, algo_rows, RESULTS_DIR / f"{algo}_{env_id}.png")
+    plot_cartpole_old_vs_new(rows, RESULTS_DIR / "finding_cartpole_old_vs_new.png")
+    plot_bias_direction(rows, RESULTS_DIR / "finding_bias_direction_cartpole_vs_pendulum.png")
+    plot_collapse_signal_vs_noise(rows, RESULTS_DIR / "finding_collapse_signal_vs_noise.png")
+    plot_cartpole_5M_oscillation(rows, RESULTS_DIR / "finding_cartpole_5M_oscillation.png")
 
     print_summary(rows)
     print(f"\nCSV: {RESULTS_DIR / 'model_evaluation.csv'}")
