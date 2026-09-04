@@ -1,4 +1,3 @@
-
 """
 visualization.py
 
@@ -17,98 +16,27 @@ For each (algorithm, environment):
 Also:
     reward_curves_cartpole.png
     reward_curves_pendulum.png
+
+See also: temporalAnalysis.py (Q-value vs training steps) and
+spatialAnalysis.py (Q-value/bias vs one state dimension, per action).
 """
 
-import glob
 import os
-import re
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
-from stable_baselines3 import DQN, SAC, TD3
 
 from Qvalue_bias import estimate_return_at_state, get_q_value
-
-
-# ============================================================
-# Configuration
-# ============================================================
-
-MODEL_DIR = "./models"
-PLOT_DIR = "./plots"
-
-GRID_N = 21
-N_MC_EPISODES = 3
-MAX_STEPS = 500
-
-ALGORITHMS = {
-    "dqn": DQN,
-    "sac": SAC,
-    "td3": TD3,
-}
-
-RUN_RE = re.compile(r"^(dqn|sac|td3)_(.+)_steps(\d+)_seed(\d+)$")
-
-GRID_SPECS = {
-    "CartPole-v1": {
-        "x_label": "Pole angle (rad)",
-        "y_label": "Pole angular velocity (rad/s)",
-        "x": np.linspace(-0.20, 0.20, GRID_N),
-        "y": np.linspace(-2.0, 2.0, GRID_N),
-    },
-    "Pendulum-v1": {
-        "x_label": "Theta (rad)",
-        "y_label": "Theta dot (rad/s)",
-        "x": np.linspace(-np.pi, np.pi, GRID_N),
-        "y": np.linspace(-8.0, 8.0, GRID_N),
-    },
-}
-
-
-# ============================================================
-# Find trained models
-# ============================================================
-
-def discover_runs():
-    runs = []
-
-    for path in glob.glob(os.path.join(MODEL_DIR, "*")):
-        name = os.path.basename(path)
-        match = RUN_RE.match(name)
-
-        if not match:
-            continue
-
-        algo, env_id, _, _ = match.groups()
-
-        if "PendulumDiscrete" in env_id:
-            continue
-
-        if os.path.exists(os.path.join(path, "final_model.zip")):
-            runs.append((algo, env_id, path))
-
-    return sorted(runs)
-
-
-# ============================================================
-# Set environment to a specific state
-# ============================================================
-
-def set_state(env_id, env, x, y):
-    env.reset()
-    base = env.unwrapped
-
-    if env_id == "CartPole-v1":
-        state = np.array([0.0, 0.0, x, y], dtype=np.float32)
-        base.state = state
-        return state.copy()
-
-    if env_id == "Pendulum-v1":
-        base.state = np.array([x, y], dtype=np.float64)
-        return base._get_obs()
-
-    raise ValueError(f"Unsupported environment: {env_id}")
+from rl_common import (
+    GRID_SPECS,
+    MAX_STEPS,
+    N_MC_EPISODES,
+    PLOT_DIR,
+    discover_runs,
+    load_model,
+    set_state,
+)
 
 
 # ============================================================
@@ -119,8 +47,8 @@ def make_heatmaps(model, env_id):
     spec = GRID_SPECS[env_id]
     env = gym.make(env_id)
 
-    q_grid = np.zeros((GRID_N, GRID_N))
-    mc_grid = np.zeros((GRID_N, GRID_N))
+    q_grid = np.zeros((len(spec["y"]), len(spec["x"])))
+    mc_grid = np.zeros((len(spec["y"]), len(spec["x"])))
 
     for i, y in enumerate(spec["y"]):
         for j, x in enumerate(spec["x"]):
@@ -295,11 +223,11 @@ def plot_snapshot(algo, env_id, q_grid, mc_grid):
 def plot_reward_curves(runs, env_id, filename):
     plt.figure(figsize=(8, 5))
 
-    for algo, run_env, run_dir in runs:
-        if run_env != env_id:
+    for r in runs:
+        if r["env_id"] != env_id:
             continue
 
-        path = os.path.join(run_dir, "eval", "evaluations.npz")
+        path = os.path.join(r["path"], "eval", "evaluations.npz")
 
         if not os.path.exists(path):
             continue
@@ -309,7 +237,7 @@ def plot_reward_curves(runs, env_id, filename):
         plt.plot(
             data["timesteps"],
             data["results"].mean(axis=1),
-            label=os.path.basename(run_dir),
+            label=os.path.basename(r["path"]),
         )
 
     plt.xlabel("Timesteps")
@@ -331,47 +259,22 @@ def main():
     runs = discover_runs()
     print(f"Found {len(runs)} run(s).")
 
-    for algo, env_id, run_dir in runs:
+    for r in runs:
+        algo, env_id = r["algo"], r["env_id"]
         print(f"Processing {algo}_{env_id}...")
 
-        model = ALGORITHMS[algo].load(
-            os.path.join(run_dir, "final_model")
-        )
+        model = load_model(algo, r["path"])
 
-        q_grid, mc_grid, bias_grid = make_heatmaps(
-            model,
-            env_id,
-        )
+        q_grid, mc_grid, bias_grid = make_heatmaps(model, env_id)
 
-        plot_heatmaps(
-            algo,
-            env_id,
-            q_grid,
-            bias_grid,
-        )
+        plot_heatmaps(algo, env_id, q_grid, bias_grid)
+        plot_snapshot(algo, env_id, q_grid, mc_grid)
 
-        plot_snapshot(
-            algo,
-            env_id,
-            q_grid,
-            mc_grid,
-        )
-
-    plot_reward_curves(
-        runs,
-        "CartPole-v1",
-        "reward_curves_cartpole.png",
-    )
-
-    plot_reward_curves(
-        runs,
-        "Pendulum-v1",
-        "reward_curves_pendulum.png",
-    )
+    plot_reward_curves(runs, "CartPole-v1", "reward_curves_cartpole.png")
+    plot_reward_curves(runs, "Pendulum-v1", "reward_curves_pendulum.png")
 
     print(f"Plots saved to {PLOT_DIR}/")
 
 
 if __name__ == "__main__":
     main()
-
