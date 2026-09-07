@@ -25,17 +25,25 @@ Two building blocks per run:
      check whether the gap survives under a cleaner test.
 
 Output: results/model_evaluation.csv + one plot per algo/env in results/.
+
+Optional --checkpoints mode: instead of the 3-4 point proxy above (separately
+trained budget runs stitched together), uses a single 1M-step run's own
+intra-run checkpoints (CheckpointCallback, >= CHECKPOINT_MIN_STEPS) for
+plot_bias_direction/plot_bias_consistency, and writes to
+results_with_checkpoints/ instead.
 """
 
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 from gymnasium import spaces
+from matplotlib.ticker import FuncFormatter, LogLocator, MultipleLocator, NullFormatter, ScalarFormatter
 from stable_baselines3 import DQN, SAC, TD3
 from stable_baselines3.common.evaluation import evaluate_policy
 
@@ -53,6 +61,17 @@ RE_EVAL_N_EPISODES = 50
 # deliberately different from the training-time eval seed (cfg.seed + 1000),
 # so this isn't correlated with the original eval schedule
 RE_EVAL_SEED = 777
+
+# --checkpoints mode: single-run, intra-run-checkpoint view of bias_direction/consistency.
+RESULTS_CHECKPOINTS_DIR = Path("results_with_checkpoints")
+CHECKPOINT_TIMESTEPS = 1_000_000
+CHECKPOINT_MIN_STEPS = 50_000
+CHECKPOINT_GROUPS = [
+    ("dqn", "CartPole-v1", "DQN / CartPole"),
+    ("dqn", "Pendulum-v1", "DQN / Pendulum"),
+    ("sac", "Pendulum-v1", "SAC / Pendulum"),
+    ("td3", "Pendulum-v1", "TD3 / Pendulum"),
+]
 
 
 def eval_curve_stats(eval_npz_path: Path) -> dict:
@@ -90,8 +109,8 @@ def make_analysis_env(algo: str, env_id: str) -> gym.Env:
     return env
 
 
-def bias_stats(algo: str, env_id: str, run_dir: Path) -> dict:
-    model = ALGOS[algo].load(run_dir / "final_model")
+def bias_stats_for_model(algo: str, env_id: str, model_path: Path) -> dict:
+    model = ALGOS[algo].load(model_path)
     env = make_analysis_env(algo, env_id)
     env.reset(seed=BIAS_SEED)
 
@@ -112,6 +131,80 @@ def bias_stats(algo: str, env_id: str, run_dir: Path) -> dict:
         # 10k model vs. 1M model)
         "relative_bias": bias_mean / abs(mc_return_mean) if mc_return_mean else float("nan"),
     }
+
+
+def bias_stats(algo: str, env_id: str, run_dir: Path) -> dict:
+    return bias_stats_for_model(algo, env_id, run_dir / "final_model")
+
+
+def discover_checkpoints(run_dir: Path, min_steps: int) -> list[tuple[int, Path]]:
+    """Intra-run checkpoints (CheckpointCallback, models/<run>/checkpoints/
+    model_<N>_steps.zip) with N >= min_steps, sorted by step count. Returns
+    (steps, model_path_without_.zip) pairs.
+    """
+    pattern = re.compile(r"^model_(\d+)_steps$")
+    checkpoints = []
+    for f in (run_dir / "checkpoints").glob("model_*_steps.zip"):
+        m = pattern.match(f.stem)
+        if m and int(m.group(1)) >= min_steps:
+            checkpoints.append((int(m.group(1)), f.with_suffix("")))
+    return sorted(checkpoints, key=lambda c: c[0])
+
+
+def checkpoint_bias_series(algo: str, env_id: str, run_dir: Path, min_steps: int) -> dict:
+    """Same computation as bias_stats_for_model, but repeated across every
+    intra-run checkpoint of a single run instead of just its final_model.
+    trained budget runs.
+    """
+    checkpoints = discover_checkpoints(run_dir, min_steps)
+    steps, bias_mean, bias_std, relative_bias = [], [], [], []
+    for s, model_path in checkpoints:
+        stats = bias_stats_for_model(algo, env_id, model_path)
+        steps.append(s)
+        bias_mean.append(stats["bias_mean"])
+        bias_std.append(stats["bias_std"])
+        relative_bias.append(stats["relative_bias"])
+    return {
+        "steps": np.array(steps),
+        "bias_mean": np.array(bias_mean),
+        "bias_std": np.array(bias_std),
+        "relative_bias": np.array(relative_bias),
+    }
+
+
+def collect_checkpoint_series(
+        models_dir: Path,
+        groups: list[tuple[str, str, str]],
+        timesteps: int,
+        min_steps: int,
+        seed: int = 0,
+) -> dict:
+    series_by_group = {}
+    for algo, env_id, label in groups:
+        run_dir = models_dir / f"{algo}_{env_id}_steps{timesteps}_seed{seed}"
+        if not run_dir.exists():
+            print(f"  skipping {label}: no run at {run_dir}")
+            continue
+        series = checkpoint_bias_series(algo, env_id, run_dir, min_steps)
+        if len(series["steps"]) == 0:
+            print(f"  skipping {label}: no checkpoints >= {min_steps:,} steps in {run_dir / 'checkpoints'}")
+            continue
+        print(
+            f"  {label}: {len(series['steps'])} checkpoint(s), {series['steps'].min():,}-{series['steps'].max():,} steps")
+        series_by_group[(algo, env_id)] = series
+    return series_by_group
+
+
+def write_checkpoint_csv(series_by_group: dict, path: Path) -> None:
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["algo", "env_id", "steps", "bias_mean", "bias_std", "relative_bias"])
+        for (algo, env_id), series in sorted(series_by_group.items()):
+            for i in range(len(series["steps"])):
+                writer.writerow([
+                    algo, env_id, int(series["steps"][i]),
+                    series["bias_mean"][i], series["bias_std"][i], series["relative_bias"][i],
+                ])
 
 
 def re_evaluate(algo: str, env_id: str, model_path: Path) -> dict:
@@ -268,6 +361,40 @@ def plot_bias_direction(rows: list[dict], out_path: Path) -> None:
     plt.close(fig)
 
 
+def _format_step_ticks(x: float, _pos) -> str:
+    return f"{x / 1_000_000:.1f}M" if x >= 1_000_000 else f"{x / 1_000:.0f}k"
+
+
+def _set_log_step_xaxis(ax) -> None:
+    ax.xaxis.set_major_locator(MultipleLocator(100_000))
+    ax.xaxis.set_major_formatter(FuncFormatter(_format_step_ticks))
+
+
+def plot_bias_direction_checkpoints(series_by_group: dict, out_path: Path) -> None:
+    """Same finding as plot_bias_direction, but x-axis = intra-run checkpoint
+    steps of a single 1M-step run instead of separately trained budget runs.
+    """
+    groups = [("dqn", "CartPole-v1", "DQN / CartPole"), ("dqn", "Pendulum-v1", "DQN / Pendulum")]
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    for algo, env_id, label in groups:
+        series = series_by_group.get((algo, env_id))
+        if series is None:
+            continue
+        ax.plot(series["steps"], series["relative_bias"], marker="o", markersize=3, label=label)
+
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    _set_log_step_xaxis(ax)
+    ax.set_xlabel(f"Training steps (single {CHECKPOINT_TIMESTEPS:,}-step run)")
+    ax.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
+    ax.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
+    ax.set_title("DQN bias direction over one continuous run:\nCartPole vs. Pendulum")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def plot_collapse_signal_vs_noise(rows: list[dict], out_path: Path) -> None:
     """Finding: most recorded peak-to-final collapses (SAC/TD3, and DQN's
     own training curve in several cases) turn out to be eval-sampling noise
@@ -331,6 +458,35 @@ def plot_bias_consistency(rows: list[dict], out_path: Path) -> None:
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
+
+def plot_bias_consistency_checkpoints(series_by_group: dict, out_path: Path) -> None:
+    """Same finding as plot_bias_consistency, but x-axis = intra-run
+    checkpoint steps of a single 1M-step run instead of separately trained
+    budget runs.
+    """
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    for algo, env_id, label in CHECKPOINT_GROUPS:
+        series = series_by_group.get((algo, env_id))
+        if series is None:
+            continue
+        ax.plot(series["steps"], series["bias_std"], marker="o", markersize=3, label=label)
+
+    ax.set_yscale("log")
+    ax.yaxis.set_major_locator(LogLocator(base=10))
+    ax.yaxis.set_major_formatter(ScalarFormatter())
+    ax.yaxis.set_minor_formatter(NullFormatter())
+    _set_log_step_xaxis(ax)
+    ax.set_xlabel(f"Training steps (single {CHECKPOINT_TIMESTEPS:,}-step run)")
+    ax.set_ylabel("bias_std across sampled states (log scale)")
+    ax.set_title(
+        "Consistency of the Q-value miscalibration over one\ncontinuous run: systematic (low) vs. erratic (high)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
     """Finding: the 5M-step DQN/CartPole run never stabilizes, it hits a
     perfect score as late as ~2M steps, then crashes and keeps oscillating
@@ -352,6 +508,7 @@ def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
+
 
 def load_rows_from_csv(csv_path: Path, models_dir: Path) -> list[dict]:
     """Lets plots be regenerated/added without rerunning the
@@ -378,6 +535,7 @@ def load_rows_from_csv(csv_path: Path, models_dir: Path) -> list[dict]:
             row["eval_means"] = data["results"].mean(axis=1)
             rows.append(row)
     return rows
+
 
 def print_summary(rows: list[dict]) -> None:
     by_group: dict[tuple[str, str], list[dict]] = {}
@@ -423,7 +581,42 @@ def main() -> None:
         help="Skip model loading/MC rollouts, regenerate plots from the existing "
              "results/model_evaluation.csv (+ cheap evaluations.npz reads) instead.",
     )
+    parser.add_argument(
+        "--checkpoints", action="store_true",
+        help="Instead of the normal analysis, use a single "
+             f"{CHECKPOINT_TIMESTEPS:,}-step run's own intra-run checkpoints "
+             f"(>= {CHECKPOINT_MIN_STEPS:,} steps) for the bias_direction/"
+             f"bias_consistency plots, and write to {RESULTS_CHECKPOINTS_DIR}/ instead.",
+    )
     args = parser.parse_args()
+
+    if args.checkpoints:
+        RESULTS_CHECKPOINTS_DIR.mkdir(exist_ok=True)
+        print(f"Collecting checkpoint series (>= {CHECKPOINT_MIN_STEPS:,} steps of the "
+              f"{CHECKPOINT_TIMESTEPS:,}-step runs)...")
+        series_by_group = collect_checkpoint_series(
+            MODELS_DIR, CHECKPOINT_GROUPS, CHECKPOINT_TIMESTEPS, CHECKPOINT_MIN_STEPS,
+        )
+        if not series_by_group:
+            print(
+                "\nNo checkpoints found for any group. train.py already saves them "
+                "under models/<run>/checkpoints/ (CheckpointCallback), but the "
+                "existing 1M-step runs predate that -- or checkpoints/ is gitignored "
+                "and was never generated/kept. Rerun training for the 1M configs first, e.g.:\n"
+                f"  python train.py --timesteps {CHECKPOINT_TIMESTEPS} --checkpoint-freq 10000"
+            )
+            return
+
+        write_checkpoint_csv(series_by_group, RESULTS_CHECKPOINTS_DIR / "checkpoint_bias.csv")
+        plot_bias_direction_checkpoints(
+            series_by_group, RESULTS_CHECKPOINTS_DIR / "finding_bias_direction_checkpoints.png"
+        )
+        plot_bias_consistency_checkpoints(
+            series_by_group, RESULTS_CHECKPOINTS_DIR / "finding_bias_consistency_checkpoints.png"
+        )
+        print(f"\nCSV: {RESULTS_CHECKPOINTS_DIR / 'checkpoint_bias.csv'}")
+        print(f"Plots: {RESULTS_CHECKPOINTS_DIR}/*.png")
+        return
 
     RESULTS_DIR.mkdir(exist_ok=True)
     csv_path = RESULTS_DIR / "model_evaluation.csv"
