@@ -35,6 +35,11 @@ ALGORITHMS = {
 
 RUN_RE = re.compile(r"^(dqn|sac|td3)_(.+)_steps(\d+)_seed(\d+)$")
 
+# Mid-training checkpoints, per train.py's CheckpointCallback(name_prefix="model"):
+#     models/<run_name>/checkpoints/model_<steps>_steps.zip
+CHECKPOINT_DIR_NAME = "checkpoints"
+CHECKPOINT_RE = re.compile(r"^model_(\d+)_steps$")
+
 GRID_SPECS = {
     "CartPole-v1": {
         "x_label": "Pole angle (rad)",
@@ -74,7 +79,13 @@ INITIAL_STATES = {
 # ============================================================
 
 def discover_runs():
-    """Return a list of dicts: algo, env_id, steps, seed, path."""
+    """Return a list of dicts: algo, env_id, steps, seed, path.
+
+    Each entry here is one *finished training instance* (one seed, one
+    total step budget) -- NOT a mid-training checkpoint. Use
+    discover_checkpoints() on a single run to get its intermediate
+    checkpoints for temporal (Q-vs-training-steps) analysis.
+    """
     runs = []
 
     for path in glob.glob(os.path.join(MODEL_DIR, "*")):
@@ -101,8 +112,51 @@ def discover_runs():
     return sorted(runs, key=lambda r: (r["algo"], r["env_id"], r["seed"], r["steps"]))
 
 
+def discover_checkpoints(run):
+    """Return the mid-training checkpoints for a single run, sorted by step.
+
+    Each item is a dict like `run` but with `steps` set to the checkpoint's
+    real step count and `path` pointing at that checkpoint's model file
+    (no .zip extension, matching what ALGORITHMS[algo].load() expects).
+    The run's own final_model is included as the last point.
+    """
+    ckpt_dir = os.path.join(run["path"], CHECKPOINT_DIR_NAME)
+    checkpoints = []
+
+    for zip_path in glob.glob(os.path.join(ckpt_dir, "*.zip")):
+        name = os.path.splitext(os.path.basename(zip_path))[0]
+        match = CHECKPOINT_RE.match(name)
+
+        if not match:
+            continue
+
+        checkpoints.append({
+            **run,
+            "steps": int(match.group(1)),
+            "path": os.path.join(ckpt_dir, name),
+        })
+
+    # Final saved model is the last point on the curve.
+    checkpoints.append({
+        **run,
+        "steps": run["steps"],
+        "path": os.path.join(run["path"], "final_model"),
+    })
+
+    # De-dupe in case the final step count also has a checkpoint file.
+    by_steps = {c["steps"]: c for c in checkpoints}
+    return sorted(by_steps.values(), key=lambda c: c["steps"])
+
+
 def load_model(algo, path):
     return ALGORITHMS[algo].load(os.path.join(path, "final_model"))
+
+
+def load_model_from_path(algo, model_path):
+    """Load a model given a full path (no .zip) to the model file itself,
+    as produced by discover_checkpoints(). Use load_model() instead when
+    you have a run directory rather than a specific checkpoint file."""
+    return ALGORITHMS[algo].load(model_path)
 
 
 def group_by(runs, keys):
