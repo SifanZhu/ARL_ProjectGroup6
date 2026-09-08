@@ -3,7 +3,7 @@
 Produces one Q-value-bias plot per trained agent (DQN/CartPole, DQN/Pendulum,
 SAC/Pendulum, TD3/Pendulum), each showing:
 
-- **Real Q-values** (scatter, blue/orange): the actual discounted return-to-go
+- **Real Q-values** (scatter, blue/orange): the actual discounted return-to-go MC
   computed from real policy rollouts, plotted against a real state variable (cart
   position for CartPole, angular velocity theta_dot for Pendulum) and colored by
   which action bucket was taken.
@@ -37,36 +37,58 @@ python plot_q_value_vs_state.py
 # Override budgets / sample size / output folder
 python plot_q_value_vs_state.py --dqn-steps 5000000 --sac-td3-steps 1000000 \
     --n-episodes 30 --out-dir plots
+
+# Also plot one PNG per DQN/CartPole checkpoint found in checkpoints/model_<N>_steps.zip
+python plot_q_value_vs_state.py --dqn-cartpole-all-checkpoints
+
+# Only specific checkpoints of the chosen DQN/CartPole run (steps must match an existing model_<N>_steps.zip)
+python plot_q_value_vs_state.py --dqn-cartpole-checkpoints 100000 500000 1000000
+
+# Only the checkpoint sweep, skip the final_model plot
+python plot_q_value_vs_state.py --dqn-cartpole-all-checkpoints --dqn-cartpole-skip-final-model
 ```
 
 ### CLI arguments
 
-| Argument            | Default     | Meaning                                                        |
-|---------------------|-------------|-----------------------------------------------------------------|
-| `--models-dir`       | `models`    | Root folder containing `<algo>_<env>_steps<N>_seed<seed>/` runs |
-| `--dqn-steps`        | `5000000`   | Timestep budget used to pick the DQN run folders (CartPole + Pendulum) |
-| `--sac-td3-steps`    | `1000000`   | Timestep budget used to pick the SAC and TD3 run folders (Pendulum) |
-| `--seed`             | `0`         | Seed suffix of the run folders to load                          |
-| `--n-episodes`       | `20`        | Number of real rollout episodes sampled for the scatter points  |
-| `--out-dir`          | `plots`     | Output folder for the generated PNGs                            |
+| Argument                          | Default     | Meaning                                                        |
+|-----------------------------------|-------------|-----------------------------------------------------------------|
+| `--models-dir`                    | `models`    | Root folder containing `<algo>_<env>_steps<N>_seed<seed>/` runs |
+| `--dqn-steps`                     | `5000000`   | Timestep budget used to pick the DQN run folders (CartPole + Pendulum) |
+| `--sac-td3-steps`                 | `1000000`   | Timestep budget used to pick the SAC and TD3 run folders (Pendulum) |
+| `--seed`                          | `0`         | Seed suffix of the run folders to load                          |
+| `--n-episodes`                    | `30`        | Number of real rollout episodes sampled for the scatter points  |
+| `--out-dir`                       | `plots`     | Output folder for the generated PNGs                            |
+| `--dqn-cartpole-all-checkpoints`  | off         | Also plot every checkpoint in the DQN/CartPole run's `checkpoints/` folder |
+| `--dqn-cartpole-checkpoints N...` | none        | Plot only these specific DQN/CartPole checkpoint timesteps (overrides `--dqn-cartpole-all-checkpoints`) |
+| `--dqn-cartpole-skip-final-model` | off         | Skip the `final_model.zip` plot for DQN/CartPole                |
 
 ## Output
 
-Four PNG files are written to `--out-dir`:
+By default, four PNG files are written to `--out-dir`:
 
 - `dqn_cartpole_q_vs_cart_position.png`
 - `dqn_pendulum_q_vs_angular_velocity.png`
 - `sac_pendulum_q_vs_angular_velocity.png`
 - `td3_pendulum_q_vs_angular_velocity.png`
 
+If `--dqn-cartpole-all-checkpoints` or `--dqn-cartpole-checkpoints` is used, one
+additional `dqn_cartpole_q_vs_cart_position_step<N>.png` is written per selected
+checkpoint.
+
 ## Model loading
 
-Each run loads `models/<run_name>/final_model.zip` (the model saved at the end of
-training, not `best_model.zip` or an intermediate checkpoint).
+DQN/Pendulum, SAC, and TD3 always load `models/<run_name>/final_model.zip` (the
+model saved at the end of training, not `best_model.zip` or an intermediate
+checkpoint).
+
+DQN/CartPole loads `final_model.zip` by default too, but can additionally (or
+instead) load snapshots from `models/<run_name>/checkpoints/model_<N>_steps.zip`
+via `--dqn-cartpole-all-checkpoints` / `--dqn-cartpole-checkpoints` /
+`--dqn-cartpole-skip-final-model`, e.g. to reproduce a "policy from iteration N"
+style progression across training.
 
 ## Known limitation
 
-The script always loads `final_model.zip` for the selected `--dqn-steps` /
-`--sac-td3-steps` run folder; it does not currently support plotting a specific
-snapshot from `models/<run_name>/checkpoints/model_<N>_steps.zip` (e.g. to reproduce
-a "policy from iteration N" style progression across training).
+Checkpoint selection (`--dqn-cartpole-all-checkpoints` /
+`--dqn-cartpole-checkpoints`) is currently only implemented for DQN/CartPole;
+DQN/Pendulum, SAC, and TD3 still always load `final_model.zip`.
