@@ -24,13 +24,16 @@ Two building blocks per run:
      episode count and a seed that is not the training-time eval seed, to
      check whether the gap survives under a cleaner test.
 
-Output: results/model_evaluation.csv + one plot per algo/env in results/.
+  4. Checkpoint progression (--checkpoints):
+     For the three 1M-timestep runs (one per algo), walks through every
+     saved checkpoint in models/<run>/checkpoints/ (model_10000_steps.zip,
+     then every 50k steps) and tracks Q-value bias + re-eval performance
+     over the course of training, instead of only comparing final_model
+     vs. best_model at the end.
 
-Optional --checkpoints mode: instead of the 3-4 point proxy above (separately
-trained budget runs stitched together), uses a single 1M-step run's own
-intra-run checkpoints (CheckpointCallback, >= CHECKPOINT_MIN_STEPS) for
-plot_bias_direction/plot_bias_consistency, and writes to
-results_with_checkpoints/ instead.
+Output: results/model_evaluation.csv + one plot per algo/env in results/.
+With --checkpoints: results/checkpoint_evaluation.csv +
+results/finding_checkpoint_progression.png instead.
 """
 
 import argparse
@@ -38,12 +41,12 @@ import csv
 import json
 import re
 from pathlib import Path
+from typing import Optional
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 from gymnasium import spaces
-from matplotlib.ticker import FuncFormatter, LogLocator, MultipleLocator, NullFormatter, ScalarFormatter
 from stable_baselines3 import DQN, SAC, TD3
 from stable_baselines3.common.evaluation import evaluate_policy
 
@@ -62,16 +65,8 @@ RE_EVAL_N_EPISODES = 50
 # so this isn't correlated with the original eval schedule
 RE_EVAL_SEED = 777
 
-# --checkpoints mode: single-run, intra-run-checkpoint view of bias_direction/consistency.
-RESULTS_CHECKPOINTS_DIR = Path("results_with_checkpoints")
-CHECKPOINT_TIMESTEPS = 1_000_000
-CHECKPOINT_MIN_STEPS = 50_000
-CHECKPOINT_GROUPS = [
-    ("dqn", "CartPole-v1", "DQN / CartPole"),
-    ("dqn", "Pendulum-v1", "DQN / Pendulum"),
-    ("sac", "Pendulum-v1", "SAC / Pendulum"),
-    ("td3", "Pendulum-v1", "TD3 / Pendulum"),
-]
+# checkpoint filenames look like "model_10000_steps.zip", "model_50000_steps.zip", ...
+CHECKPOINT_STEPS_RE = re.compile(r"(\d+)_steps")
 
 
 def eval_curve_stats(eval_npz_path: Path) -> dict:
@@ -109,7 +104,9 @@ def make_analysis_env(algo: str, env_id: str) -> gym.Env:
     return env
 
 
-def bias_stats_for_model(algo: str, env_id: str, model_path: Path) -> dict:
+def bias_stats_from_path(algo: str, env_id: str, model_path: Path) -> dict:
+    """Q-value bias for an arbitrary saved checkpoint (final_model, best_model,
+    or one of the intermediate checkpoints/ files)."""
     model = ALGOS[algo].load(model_path)
     env = make_analysis_env(algo, env_id)
     env.reset(seed=BIAS_SEED)
@@ -134,77 +131,8 @@ def bias_stats_for_model(algo: str, env_id: str, model_path: Path) -> dict:
 
 
 def bias_stats(algo: str, env_id: str, run_dir: Path) -> dict:
-    return bias_stats_for_model(algo, env_id, run_dir / "final_model")
-
-
-def discover_checkpoints(run_dir: Path, min_steps: int) -> list[tuple[int, Path]]:
-    """Intra-run checkpoints (CheckpointCallback, models/<run>/checkpoints/
-    model_<N>_steps.zip) with N >= min_steps, sorted by step count. Returns
-    (steps, model_path_without_.zip) pairs.
-    """
-    pattern = re.compile(r"^model_(\d+)_steps$")
-    checkpoints = []
-    for f in (run_dir / "checkpoints").glob("model_*_steps.zip"):
-        m = pattern.match(f.stem)
-        if m and int(m.group(1)) >= min_steps:
-            checkpoints.append((int(m.group(1)), f.with_suffix("")))
-    return sorted(checkpoints, key=lambda c: c[0])
-
-
-def checkpoint_bias_series(algo: str, env_id: str, run_dir: Path, min_steps: int) -> dict:
-    """Same computation as bias_stats_for_model, but repeated across every
-    intra-run checkpoint of a single run instead of just its final_model.
-    trained budget runs.
-    """
-    checkpoints = discover_checkpoints(run_dir, min_steps)
-    steps, bias_mean, bias_std, relative_bias = [], [], [], []
-    for s, model_path in checkpoints:
-        stats = bias_stats_for_model(algo, env_id, model_path)
-        steps.append(s)
-        bias_mean.append(stats["bias_mean"])
-        bias_std.append(stats["bias_std"])
-        relative_bias.append(stats["relative_bias"])
-    return {
-        "steps": np.array(steps),
-        "bias_mean": np.array(bias_mean),
-        "bias_std": np.array(bias_std),
-        "relative_bias": np.array(relative_bias),
-    }
-
-
-def collect_checkpoint_series(
-        models_dir: Path,
-        groups: list[tuple[str, str, str]],
-        timesteps: int,
-        min_steps: int,
-        seed: int = 0,
-) -> dict:
-    series_by_group = {}
-    for algo, env_id, label in groups:
-        run_dir = models_dir / f"{algo}_{env_id}_steps{timesteps}_seed{seed}"
-        if not run_dir.exists():
-            print(f"  skipping {label}: no run at {run_dir}")
-            continue
-        series = checkpoint_bias_series(algo, env_id, run_dir, min_steps)
-        if len(series["steps"]) == 0:
-            print(f"  skipping {label}: no checkpoints >= {min_steps:,} steps in {run_dir / 'checkpoints'}")
-            continue
-        print(
-            f"  {label}: {len(series['steps'])} checkpoint(s), {series['steps'].min():,}-{series['steps'].max():,} steps")
-        series_by_group[(algo, env_id)] = series
-    return series_by_group
-
-
-def write_checkpoint_csv(series_by_group: dict, path: Path) -> None:
-    with open(path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["algo", "env_id", "steps", "bias_mean", "bias_std", "relative_bias"])
-        for (algo, env_id), series in sorted(series_by_group.items()):
-            for i in range(len(series["steps"])):
-                writer.writerow([
-                    algo, env_id, int(series["steps"][i]),
-                    series["bias_mean"][i], series["bias_std"][i], series["relative_bias"][i],
-                ])
+    """Thin wrapper kept for evaluate_run() -- bias of the final_model."""
+    return bias_stats_from_path(algo, env_id, run_dir / "final_model")
 
 
 def re_evaluate(algo: str, env_id: str, model_path: Path) -> dict:
@@ -284,6 +212,43 @@ def evaluate_run(run_dir: Path) -> dict:
     return row
 
 
+def find_checkpoints(run_dir: Path) -> list[tuple[int, Path]]:
+    """Finds all checkpoint files in run_dir/checkpoints, sorted by training
+    step extracted from the filename (model_10000_steps.zip, model_50000_steps.zip, ...).
+    """
+    ckpt_dir = run_dir / "checkpoints"
+    checkpoints = []
+    for path in ckpt_dir.glob("*.zip"):
+        m = CHECKPOINT_STEPS_RE.search(path.stem)
+        if m:
+            checkpoints.append((int(m.group(1)), path))
+    return sorted(checkpoints, key=lambda x: x[0])
+
+
+def evaluate_checkpoints(run_dir: Path) -> list[dict]:
+    """Walks every saved checkpoint of a single run and computes bias +
+    re-eval performance at each one, giving a fine-grained (every 50k, plus
+    an initial 10k point) view of how the run evolved -- rather than just
+    the 3-point (10k/100k/1M) approximation across separate runs.
+    """
+    with open(run_dir / "config.json") as f:
+        config = json.load(f)
+    algo, env_id = config["algo"], config["env_id"]
+
+    rows = []
+    for steps, ckpt_path in find_checkpoints(run_dir):
+        row = {
+            "run_name": run_dir.name,
+            "algo": algo,
+            "env_id": env_id,
+            "checkpoint_steps": steps,
+        }
+        row.update(bias_stats_from_path(algo, env_id, ckpt_path))
+        row.update(re_evaluate(algo, env_id, ckpt_path))
+        rows.append(row)
+    return rows
+
+
 def write_csv(rows: list[dict], path: Path) -> None:
     fieldnames = [
         "run_name", "variant", "algo", "env_id", "timesteps", "seed",
@@ -293,6 +258,18 @@ def write_csv(rows: list[dict], path: Path) -> None:
         "best_saved_at_timesteps", "best_reeval_mean", "best_reeval_std",
         "final_reeval_mean", "final_reeval_std",
         "reeval_degradation", "reeval_degradation_sem_ratio",
+    ]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_checkpoint_csv(rows: list[dict], path: Path) -> None:
+    fieldnames = [
+        "run_name", "algo", "env_id", "checkpoint_steps",
+        "bias_mean", "bias_std", "relative_bias", "q_pred_mean", "mc_return_mean",
+        "reeval_mean", "reeval_std", "saved_at_timesteps",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -355,40 +332,6 @@ def plot_bias_direction(rows: list[dict], out_path: Path) -> None:
     ax.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
     ax.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
     ax.set_title("DQN bias direction: overestimation (Pendulum) vs.\nunderestimation (CartPole) are the same algorithm")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
-def _format_step_ticks(x: float, _pos) -> str:
-    return f"{x / 1_000_000:.1f}M" if x >= 1_000_000 else f"{x / 1_000:.0f}k"
-
-
-def _set_log_step_xaxis(ax) -> None:
-    ax.xaxis.set_major_locator(MultipleLocator(100_000))
-    ax.xaxis.set_major_formatter(FuncFormatter(_format_step_ticks))
-
-
-def plot_bias_direction_checkpoints(series_by_group: dict, out_path: Path) -> None:
-    """Same finding as plot_bias_direction, but x-axis = intra-run checkpoint
-    steps of a single 1M-step run instead of separately trained budget runs.
-    """
-    groups = [("dqn", "CartPole-v1", "DQN / CartPole"), ("dqn", "Pendulum-v1", "DQN / Pendulum")]
-    fig, ax = plt.subplots(figsize=(7, 5))
-
-    for algo, env_id, label in groups:
-        series = series_by_group.get((algo, env_id))
-        if series is None:
-            continue
-        ax.plot(series["steps"], series["relative_bias"], marker="o", markersize=3, label=label)
-
-    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
-    _set_log_step_xaxis(ax)
-    ax.set_xlabel(f"Training steps (single {CHECKPOINT_TIMESTEPS:,}-step run)")
-    ax.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
-    ax.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
-    ax.set_title("DQN bias direction over one continuous run:\nCartPole vs. Pendulum")
     ax.legend()
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -459,34 +402,6 @@ def plot_bias_consistency(rows: list[dict], out_path: Path) -> None:
     plt.close(fig)
 
 
-def plot_bias_consistency_checkpoints(series_by_group: dict, out_path: Path) -> None:
-    """Same finding as plot_bias_consistency, but x-axis = intra-run
-    checkpoint steps of a single 1M-step run instead of separately trained
-    budget runs.
-    """
-    fig, ax = plt.subplots(figsize=(7, 5))
-
-    for algo, env_id, label in CHECKPOINT_GROUPS:
-        series = series_by_group.get((algo, env_id))
-        if series is None:
-            continue
-        ax.plot(series["steps"], series["bias_std"], marker="o", markersize=3, label=label)
-
-    ax.set_yscale("log")
-    ax.yaxis.set_major_locator(LogLocator(base=10))
-    ax.yaxis.set_major_formatter(ScalarFormatter())
-    ax.yaxis.set_minor_formatter(NullFormatter())
-    _set_log_step_xaxis(ax)
-    ax.set_xlabel(f"Training steps (single {CHECKPOINT_TIMESTEPS:,}-step run)")
-    ax.set_ylabel("bias_std across sampled states (log scale)")
-    ax.set_title(
-        "Consistency of the Q-value miscalibration over one\ncontinuous run: systematic (low) vs. erratic (high)")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
 def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
     """Finding: the 5M-step DQN/CartPole run never stabilizes, it hits a
     perfect score as late as ~2M steps, then crashes and keeps oscillating
@@ -508,6 +423,77 @@ def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
+
+
+def plot_checkpoint_progression(all_ckpt_rows: dict[tuple[str, str], list[dict]], out_path: Path) -> None:
+    """Tracks Q-value bias (absolute and relative) and re-eval performance
+    across every saved checkpoint of the 1M-timestep runs (one per
+    (algo, env_id) group), giving a much finer-grained view of the training
+    trajectory than the 3-point (10k/100k/1M) approximation used elsewhere.
+
+    Absolute bias_mean is plotted next to relative_bias because
+    relative_bias = bias_mean / |mc_return_mean| spikes whenever a
+    checkpoint's return happens to be small -- which can mean a genuinely
+    worse Q-function, or just a checkpoint with an unusually bad episode
+    return diluting an otherwise-unremarkable bias. The absolute panel
+    disambiguates the two.
+    """
+    fig, (ax0, ax1, ax2) = plt.subplots(1, 3, figsize=(18, 5))
+
+    for (algo, env_id), rows in all_ckpt_rows.items():
+        rows = sorted(rows, key=lambda r: r["checkpoint_steps"])
+        if not rows:
+            continue
+        label = f"{algo.upper()}/{env_id}"
+        steps = [r["checkpoint_steps"] for r in rows]
+        ax0.plot(steps, [r["bias_mean"] for r in rows], marker="o", label=label)
+        ax1.plot(steps, [r["relative_bias"] for r in rows], marker="o", label=label)
+        ax2.plot(steps, [r["reeval_mean"] for r in rows], marker="o", label=label)
+
+    ax0.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    ax0.set_xlabel("Timesteps")
+    ax0.set_ylabel("Q-value bias (bias_mean, absolute)")
+    ax0.set_title("Absolute Q-value bias over training\n(1M runs, every checkpoint)")
+    ax0.legend()
+
+    ax1.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    ax1.set_xlabel("Timesteps")
+    ax1.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
+    ax1.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
+    ax1.set_title("Relative Q-value bias over training\n(1M runs, every checkpoint)")
+    ax1.legend()
+
+    ax2.set_xlabel("Timesteps")
+    ax2.set_ylabel(f"Re-eval mean reward (n={RE_EVAL_N_EPISODES})")
+    ax2.set_title("Performance over training\n(1M runs, every checkpoint)")
+    ax2.legend()
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def load_checkpoint_rows_from_csv(csv_path: Path) -> dict[tuple[str, str], list[dict]]:
+    """Regenerates the checkpoint-progression plot from a previously written
+    checkpoint_evaluation.csv, without reloading models or rerunning the
+    MC rollouts / re-evaluation that produced it.
+    """
+    int_fields = {"checkpoint_steps", "saved_at_timesteps"}
+    str_fields = {"run_name", "algo", "env_id"}
+
+    ckpt_rows_by_group: dict[tuple[str, str], list[dict]] = {}
+    with open(csv_path) as f:
+        for raw in csv.DictReader(f):
+            row = {}
+            for key, value in raw.items():
+                if key in str_fields:
+                    row[key] = value
+                elif key in int_fields:
+                    row[key] = int(value)
+                else:
+                    row[key] = float(value)
+            ckpt_rows_by_group.setdefault((row["algo"], row["env_id"]), []).append(row)
+    return ckpt_rows_by_group
 
 
 def load_rows_from_csv(csv_path: Path, models_dir: Path) -> list[dict]:
@@ -566,6 +552,19 @@ def print_summary(rows: list[dict]) -> None:
                 )
 
 
+def print_checkpoint_summary(all_ckpt_rows: dict[tuple[str, str], list[dict]]) -> None:
+    for (algo, env_id), rows in all_ckpt_rows.items():
+        rows = sorted(rows, key=lambda r: r["checkpoint_steps"])
+        print(f"\n=== {algo.upper()}/{env_id} checkpoint progression (1M run) ===")
+        for row in rows:
+            print(
+                f"  steps={row['checkpoint_steps']:>8} | "
+                f"reeval={row['reeval_mean']:8.1f}±{row['reeval_std']:.1f} | "
+                f"bias_mean={row['bias_mean']:+8.2f} bias_std={row['bias_std']:7.2f} "
+                f"relative_bias={row['relative_bias']:+7.1%}"
+            )
+
+
 def make_plots(rows: list[dict]) -> None:
     plot_cartpole_old_vs_new(rows, RESULTS_DIR / "finding_cartpole_old_vs_new.png")
     plot_bias_direction(rows, RESULTS_DIR / "finding_bias_direction_cartpole_vs_pendulum.png")
@@ -574,51 +573,94 @@ def make_plots(rows: list[dict]) -> None:
     plot_bias_consistency(rows, RESULTS_DIR / "finding_bias_consistency.png")
 
 
+def run_checkpoints_mode(plots_only: bool = False, csv_path: Optional[Path] = None) -> None:
+    """Evaluates every saved checkpoint of the 1M-timestep runs (grouped by
+    (algo, env_id), since more than one run can share an algo -- e.g.
+    DQN/CartPole and DQN/Pendulum) and plots how bias and performance evolve
+    over the course of training.
+
+    plots_only: regenerate the plot from the existing checkpoint_evaluation.csv
+    instead of reloading every checkpoint .zip and rerunning MC rollouts +
+    re-evaluation (which requires the models/*/checkpoints/ directories to
+    still exist on disk).
+
+    csv_path: write/read the checkpoint CSV here instead of the default
+    results/checkpoint_evaluation.csv -- e.g. so a teammate evaluating their
+    own local checkpoints doesn't overwrite the shared CSV, and can hand back
+    a separate file to be merged in by hand.
+    """
+    if csv_path is None:
+        csv_path = RESULTS_DIR / "checkpoint_evaluation.csv"
+        plot_path = RESULTS_DIR / "finding_checkpoint_progression.png"
+    else:
+        plot_path = csv_path.with_name(f"finding_{csv_path.stem}.png")
+
+    if plots_only:
+        ckpt_rows_by_group = load_checkpoint_rows_from_csv(csv_path)
+    else:
+        run_dirs_1m = []
+        for cfg_path in MODELS_DIR.glob("*/config.json"):
+            with open(cfg_path) as f:
+                config = json.load(f)
+            if config["timesteps"] == 1_000_000:
+                run_dirs_1m.append(cfg_path.parent)
+
+        ckpt_rows_by_group: dict[tuple[str, str], list[dict]] = {}
+        all_ckpt_rows: list[dict] = []
+        for run_dir in sorted(run_dirs_1m):
+            with open(run_dir / "config.json") as f:
+                config = json.load(f)
+            group = (config["algo"], config["env_id"])
+            rows_for_run = evaluate_checkpoints(run_dir)
+            if not rows_for_run:
+                print(f"Warnung: keine Checkpoints gefunden in {run_dir / 'checkpoints'}")
+                continue
+            ckpt_rows_by_group[group] = rows_for_run
+            all_ckpt_rows.extend(rows_for_run)
+
+        write_checkpoint_csv(all_ckpt_rows, csv_path)
+
+    plot_checkpoint_progression(ckpt_rows_by_group, plot_path)
+
+    print_checkpoint_summary(ckpt_rows_by_group)
+    print(f"\nCSV: {csv_path}")
+    print(f"Plot: {plot_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--plots-only", action="store_true",
         help="Skip model loading/MC rollouts, regenerate plots from the existing "
-             "results/model_evaluation.csv (+ cheap evaluations.npz reads) instead.",
+             "results/model_evaluation.csv (+ cheap evaluations.npz reads) instead. "
+             "Combined with --checkpoints, regenerates from "
+             "results/checkpoint_evaluation.csv instead, with no models/ access at all.",
     )
     parser.add_argument(
         "--checkpoints", action="store_true",
-        help="Instead of the normal analysis, use a single "
-             f"{CHECKPOINT_TIMESTEPS:,}-step run's own intra-run checkpoints "
-             f"(>= {CHECKPOINT_MIN_STEPS:,} steps) for the bias_direction/"
-             f"bias_consistency plots, and write to {RESULTS_CHECKPOINTS_DIR}/ instead.",
+        help="Evaluate every saved checkpoint (models/*/checkpoints/model_*_steps.zip) "
+             "of the 1M-timestep runs found under models/ instead of the final/best "
+             "models, and plot bias/performance over the course of training.",
+    )
+    parser.add_argument(
+        "--output", type=str, default=None,
+        help="Only with --checkpoints: write the CSV (and its plot) to this path "
+             "instead of results/checkpoint_evaluation.csv. Use this when evaluating "
+             "your own local checkpoints for a run someone else already has results "
+             "for, so you don't overwrite their CSV -- hand back the separate file "
+             "to be merged in by hand instead.",
     )
     args = parser.parse_args()
 
-    if args.checkpoints:
-        RESULTS_CHECKPOINTS_DIR.mkdir(exist_ok=True)
-        print(f"Collecting checkpoint series (>= {CHECKPOINT_MIN_STEPS:,} steps of the "
-              f"{CHECKPOINT_TIMESTEPS:,}-step runs)...")
-        series_by_group = collect_checkpoint_series(
-            MODELS_DIR, CHECKPOINT_GROUPS, CHECKPOINT_TIMESTEPS, CHECKPOINT_MIN_STEPS,
-        )
-        if not series_by_group:
-            print(
-                "\nNo checkpoints found for any group. train.py already saves them "
-                "under models/<run>/checkpoints/ (CheckpointCallback), but the "
-                "existing 1M-step runs predate that -- or checkpoints/ is gitignored "
-                "and was never generated/kept. Rerun training for the 1M configs first, e.g.:\n"
-                f"  python train.py --timesteps {CHECKPOINT_TIMESTEPS} --checkpoint-freq 10000"
-            )
-            return
+    RESULTS_DIR.mkdir(exist_ok=True)
 
-        write_checkpoint_csv(series_by_group, RESULTS_CHECKPOINTS_DIR / "checkpoint_bias.csv")
-        plot_bias_direction_checkpoints(
-            series_by_group, RESULTS_CHECKPOINTS_DIR / "finding_bias_direction_checkpoints.png"
+    if args.checkpoints:
+        run_checkpoints_mode(
+            plots_only=args.plots_only,
+            csv_path=Path(args.output) if args.output else None,
         )
-        plot_bias_consistency_checkpoints(
-            series_by_group, RESULTS_CHECKPOINTS_DIR / "finding_bias_consistency_checkpoints.png"
-        )
-        print(f"\nCSV: {RESULTS_CHECKPOINTS_DIR / 'checkpoint_bias.csv'}")
-        print(f"Plots: {RESULTS_CHECKPOINTS_DIR}/*.png")
         return
 
-    RESULTS_DIR.mkdir(exist_ok=True)
     csv_path = RESULTS_DIR / "model_evaluation.csv"
 
     if args.plots_only:
