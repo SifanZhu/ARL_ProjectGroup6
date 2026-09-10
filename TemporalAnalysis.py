@@ -100,7 +100,7 @@ def make_temporal_plot(run):
     fig.suptitle(f"{algo.upper()} ({env_id}, seed={seed}) -- Q-value evolution over training")
     plt.tight_layout()
 
-    filename = f"temporal_{algo}_{env_id}_seed{seed}.png"
+    filename = f"temporal_{algo}_{env_id}_steps{run['steps']}_seed{seed}.png"
     plt.savefig(os.path.join(PLOT_DIR, filename), dpi=150)
     plt.close()
     print(f"  saved {filename}")
