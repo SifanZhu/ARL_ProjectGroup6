@@ -169,12 +169,17 @@ def train_batch(
     seeds: List[int],
     env_overrides: Optional[Dict[str, str]] = None,
     out_dir: str = "models",
+    checkpoint_freq: int = 10_000,
+    eval_freq: int = 2_000,
 ) -> List[Tuple[TrainConfig, Path]]:
     """Trainiert alle Kombinationen aus algos x timesteps_list x seeds x envs.
 
     env_overrides: optionales dict {algo: env_id}; sonst wird DEFAULT_ENVS verwendet.
     DEFAULT_ENVS-Werte können Listen sein (z.B. dqn: [CartPole, Pendulum]) -- jedes
     Env wird dann als eigene Dimension iteriert.
+    checkpoint_freq / eval_freq: werden an jede erzeugte TrainConfig durchgereicht
+    (vorher wurden diese Werte hier ignoriert und es blieb immer beim TrainConfig-
+    Default von 10_000 bzw. 2_000 Steps).
     Gibt eine Liste (TrainConfig, model_path) für jeden Run zurück.
     """
     env_overrides = env_overrides or {}
@@ -188,7 +193,13 @@ def train_batch(
             for timesteps in timesteps_list:
                 for seed in seeds:
                     cfg = TrainConfig(
-                        algo=algo, env_id=env_id, timesteps=timesteps, seed=seed, out_dir=out_dir
+                        algo=algo,
+                        env_id=env_id,
+                        timesteps=timesteps,
+                        seed=seed,
+                        out_dir=out_dir,
+                        checkpoint_freq=checkpoint_freq,
+                        eval_freq=eval_freq,
                     )
                     print(f"[train] {cfg.run_name} ...")
                     model_path = train_model(cfg)
@@ -233,6 +244,8 @@ def main():
         seeds=args.seeds,
         env_overrides=env_overrides,
         out_dir=args.out_dir,
+        checkpoint_freq=args.checkpoint_freq,
+        eval_freq=args.eval_freq,
     )
 
 
