@@ -39,6 +39,7 @@ import argparse
 import csv
 import json
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -409,28 +410,45 @@ def select_canonical_checkpoint_runs(ckpt_rows_by_run: dict[str, list[dict]]) ->
     return canonical
 
 
-# =============================================================================
 # Plots: default (budget-comparison) mode
-# =============================================================================
+
+def _aggregate_new_by_budget(
+    rows: list[dict], algo: str, env_id: str, value_key: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Groups 'new'-variant rows for (algo, env_id) by training budget and
+    aggregates value_key across seeds sharing that budget.
+
+    Returns (budgets, means, lo, hi), all sorted by budget.
+    """
+    by_budget = defaultdict(list)
+    for r in rows:
+        if r["algo"] == algo and r["env_id"] == env_id and r["variant"] == "new":
+            by_budget[r["timesteps"]].append(r[value_key])
+
+    budgets = np.array(sorted(by_budget))
+    means = np.array([np.mean(by_budget[b]) for b in budgets])
+    lo = np.array([np.min(by_budget[b]) for b in budgets])
+    hi = np.array([np.max(by_budget[b]) for b in budgets])
+    return budgets, means, lo, hi
+
 
 def plot_bias_direction(rows: list[dict], out_path: Path) -> None:
     """Finding: DQN's Q-value bias direction is opposite on CartPole
     (underestimates for most of training) vs. Pendulum (overestimates for
     most of training).
+
+    Budgets with more than one seed are aggregated:
+    mean line, shaded band spans the observed min-max across seeds.
     """
     groups = [("dqn", "CartPole-v1", "DQN / CartPole"), ("dqn", "Pendulum-v1", "DQN / Pendulum")]
     fig, ax = plt.subplots(figsize=(7, 5))
 
     for algo, env_id, label in groups:
-        group_rows = sorted(
-            (r for r in rows if r["algo"] == algo and r["env_id"] == env_id and r["variant"] == "new"),
-            key=lambda r: r["timesteps"],
-        )
-        if not group_rows:
+        budgets, means, lo, hi = _aggregate_new_by_budget(rows, algo, env_id, "relative_bias")
+        if len(budgets) == 0:
             continue
-        budgets = [r["timesteps"] for r in group_rows]
-        rel_bias = [r["relative_bias"] for r in group_rows]
-        ax.plot(budgets, rel_bias, marker="o", label=label)
+        line, = ax.plot(budgets, means, marker="o", label=label)
+        ax.fill_between(budgets, lo, hi, color=line.get_color(), alpha=0.2, linewidth=0)
 
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xscale("log")
@@ -447,6 +465,9 @@ def plot_bias_direction(rows: list[dict], out_path: Path) -> None:
 def plot_bias_consistency(rows: list[dict], out_path: Path) -> None:
     """Finding: bias_std shows a different kind of instability than bias
     direction/magnitude.
+
+    Budgets with more than one seed are aggregated:
+    mean line, shaded band spans the observed min-max across seeds.
     """
     groups = [
         ("dqn", "CartPole-v1", "DQN / CartPole"),
@@ -457,15 +478,11 @@ def plot_bias_consistency(rows: list[dict], out_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(7, 5))
 
     for algo, env_id, label in groups:
-        group_rows = sorted(
-            (r for r in rows if r["algo"] == algo and r["env_id"] == env_id and r["variant"] == "new"),
-            key=lambda r: r["timesteps"],
-        )
-        if not group_rows:
+        budgets, means, lo, hi = _aggregate_new_by_budget(rows, algo, env_id, "bias_std")
+        if len(budgets) == 0:
             continue
-        budgets = [r["timesteps"] for r in group_rows]
-        bias_std = [r["bias_std"] for r in group_rows]
-        ax.plot(budgets, bias_std, marker="o", label=label)
+        line, = ax.plot(budgets, means, marker="o", label=label)
+        ax.fill_between(budgets, lo, hi, color=line.get_color(), alpha=0.2, linewidth=0)
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -513,8 +530,16 @@ def plot_collapse_signal_vs_noise(rows: list[dict], out_path: Path) -> None:
         return
     candidates = sorted(candidates, key=lambda r: abs(r["reeval_degradation_sem_ratio"]))
 
+    def base_label(r: dict) -> str:
+        return f"{r['algo']}/{r['env_id']} {r['timesteps']:,}" + ("" if r["variant"] == "new" else f" [{r['variant']}]")
+
+    # Budgets with more than one seed need the
+    # seed appended so each one gets its own row.
+    base_counts: dict[str, int] = defaultdict(int)
+    for r in candidates:
+        base_counts[base_label(r)] += 1
     labels = [
-        f"{r['algo']}/{r['env_id']} {r['timesteps']:,}" + ("" if r["variant"] == "new" else f" [{r['variant']}]")
+        base_label(r) + (f" (seed {r['seed']})" if base_counts[base_label(r)] > 1 else "")
         for r in candidates
     ]
     values = [r["reeval_degradation_sem_ratio"] for r in candidates]
@@ -585,9 +610,7 @@ def run_default_mode(plots_only: bool) -> None:
     print(f"Plots: {RESULTS_DIR}/*.png")
 
 
-# =============================================================================
 # Plots: --checkpoints mode
-# =============================================================================
 
 def plot_checkpoint_progression(all_ckpt_rows: dict[str, list[dict]], out_path: Path) -> None:
     """Tracks relative Q-value bias and re-eval performance across every
@@ -745,9 +768,7 @@ def run_checkpoints_mode(plots_only: bool = False, csv_path: Optional[Path] = No
     print(f"Plot: {plot_path}")
 
 
-# =============================================================================
 # CLI
-# =============================================================================
 
 def main() -> None:
     parser = argparse.ArgumentParser()
