@@ -1,39 +1,38 @@
 """
 "Lassen sich typische Fehler- oder Instabilitätsmuster identifizieren?"
-based on the data currently available in models/ (3 algos x 3 training
-budgets, seed 0).
 
-Two building blocks per run:
+Two modes, sharing the same three measurement primitives:
 
-  1. Eval curve instability (from eval/evaluations.npz):
-     Is the peak of the eval performance during training higher than the
-     performance at the end?
+  Default mode: compares final_model/best_model across separately-trained
+  runs at different timestep budgets (10k/100k/1M/5M) for each (algo, env).
+  Since each budget is a completely separate training run, this is only a
+  coarse (3-4 point) approximation of a single run's time course.
 
-  2. Q-value bias (via Qvalue_bias.estimate_bias_over_random_states):
-     Over-/underestimation of the final model per budget. Since 10k/100k/1M
-     use the same seed, they are a rough (3-point) approximation of the
-     time course of a single training run.
+  --checkpoints mode: walks every intermediate checkpoint
+  (models/<run>/checkpoints/model_<N>_steps.zip) of every 1M-timestep run
+  found under models/, giving a much finer-grained (every 10k-50k steps)
+  view of how bias and performance evolve over one continuous run. More
+  than one run can share an (algo, env_id); e.g. two independently
+  trained runs of DQN/CartPole-v1 with the same config.json (see
+  CHECKPOINT_TAG_LABELS).
 
-  3. Independent re-evaluation of best_model vs. final_model:
-     The peak-vs-final degradation in evaluations.npz is based on only
-     n_eval_episodes=5 per checkpoint, and since best_model/final_model
-     share the same seed + eval schedule (SAC and TD3 in particular both
-     peak/collapse at the exact same timestep), that gap could just be
-     correlated eval-sampling noise rather than a real difference. This
-     re-evaluates both checkpoints independently with a much larger
-     episode count and a seed that is not the training-time eval seed, to
-     check whether the gap survives under a cleaner test.
+The three measurement primitives, used by both modes:
 
-  4. Checkpoint progression (--checkpoints):
-     For the three 1M-timestep runs (one per algo), walks through every
-     saved checkpoint in models/<run>/checkpoints/ (model_10000_steps.zip,
-     then every 50k steps) and tracks Q-value bias + re-eval performance
-     over the course of training, instead of only comparing final_model
-     vs. best_model at the end.
+  1. Training-time eval curve (eval_curve_stats, reading
+     eval/evaluations.npz): SB3's EvalCallback, n_eval_episodes=5, run
+     during training.
 
-Output: results/model_evaluation.csv + one plot per algo/env in results/.
-With --checkpoints: results/checkpoint_evaluation.csv +
-results/finding_checkpoint_progression.png instead.
+  2. Q-value bias via Monte-Carlo rollout (bias_stats_from_path /
+     Qvalue_bias.estimate_bias_over_random_states): for n_states=50 random
+     resets, rolls out one episode under the model's own deterministic
+     policy and compares its own predicted Q-value against the return that
+     rollout actually achieved.
+
+  3. Independent re-evaluation (re_evaluate): evaluate_policy with
+     n_eval_episodes=50 on a fresh seed never used during training,
+     specifically to check whether an apparent training-time collapse
+     (see collapse_check / plot_collapse_signal_vs_noise) survives
+     independent scrutiny.
 """
 
 import argparse
@@ -47,6 +46,7 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 from gymnasium import spaces
+from matplotlib.ticker import FuncFormatter
 from stable_baselines3 import DQN, SAC, TD3
 from stable_baselines3.common.evaluation import evaluate_policy
 
@@ -57,6 +57,7 @@ ALGOS = {"dqn": DQN, "sac": SAC, "td3": TD3}
 
 MODELS_DIR = Path("models")
 RESULTS_DIR = Path("results")
+
 BIAS_N_STATES = 50
 BIAS_SEED = 12345  # for comparing runs against each other
 
@@ -67,6 +68,26 @@ RE_EVAL_SEED = 777
 
 # checkpoint filenames look like "model_10000_steps.zip", "model_50000_steps.zip", ...
 CHECKPOINT_STEPS_RE = re.compile(r"(\d+)_steps")
+
+CHECKPOINT_TAG_LABELS = {
+    "": "run A",
+    "old": "old",
+    "sifan": "run B",
+}
+
+
+# Core measurement primitives
+
+def make_analysis_env(algo: str, env_id: str) -> gym.Env:
+    """Builds an env matching how the model was actually trained. DQN on a
+    continuous-action env (Pendulum) was trained through DiscretizeActionWrapper
+    (see train.py), so bias/re-eval must use the same wrapper or actions
+    won't match what the network expects.
+    """
+    env = gym.make(env_id)
+    if algo == "dqn" and isinstance(env.action_space, spaces.Box):
+        env = DiscretizeActionWrapper(env)
+    return env
 
 
 def eval_curve_stats(eval_npz_path: Path) -> dict:
@@ -90,18 +111,6 @@ def eval_curve_stats(eval_npz_path: Path) -> dict:
         "eval_timesteps": timesteps,
         "eval_means": means,
     }
-
-
-def make_analysis_env(algo: str, env_id: str) -> gym.Env:
-    """Builds an env matching how the model was actually trained. DQN on a
-    continuous-action env (Pendulum) was trained through DiscretizeActionWrapper
-    (see train.py), so bias/re-eval must use the same wrapper or actions
-    won't match what the network expects.
-    """
-    env = gym.make(env_id)
-    if algo == "dqn" and isinstance(env.action_space, spaces.Box):
-        env = DiscretizeActionWrapper(env)
-    return env
 
 
 def bias_stats_from_path(algo: str, env_id: str, model_path: Path) -> dict:
@@ -128,11 +137,6 @@ def bias_stats_from_path(algo: str, env_id: str, model_path: Path) -> dict:
         # 10k model vs. 1M model)
         "relative_bias": bias_mean / abs(mc_return_mean) if mc_return_mean else float("nan"),
     }
-
-
-def bias_stats(algo: str, env_id: str, run_dir: Path) -> dict:
-    """Thin wrapper kept for evaluate_run() -- bias of the final_model."""
-    return bias_stats_from_path(algo, env_id, run_dir / "final_model")
 
 
 def re_evaluate(algo: str, env_id: str, model_path: Path) -> dict:
@@ -193,6 +197,10 @@ def collapse_check(algo: str, env_id: str, run_dir: Path) -> dict:
 
 
 def evaluate_run(run_dir: Path) -> dict:
+    """Default-mode measurement for one independently-trained run: training
+    curve stats, Q-value bias of its final_model, and best-vs-final collapse
+    check.
+    """
     with open(run_dir / "config.json") as f:
         config = json.load(f)
 
@@ -207,7 +215,7 @@ def evaluate_run(run_dir: Path) -> dict:
         "seed": config["seed"],
     }
     row.update(eval_curve_stats(run_dir / "eval" / "evaluations.npz"))
-    row.update(bias_stats(config["algo"], config["env_id"], run_dir))
+    row.update(bias_stats_from_path(config["algo"], config["env_id"], run_dir / "final_model"))
     row.update(collapse_check(config["algo"], config["env_id"], run_dir))
     return row
 
@@ -249,6 +257,8 @@ def evaluate_checkpoints(run_dir: Path) -> list[dict]:
     return rows
 
 
+# CSV I/O
+
 def write_csv(rows: list[dict], path: Path) -> None:
     fieldnames = [
         "run_name", "variant", "algo", "env_id", "timesteps", "seed",
@@ -277,35 +287,131 @@ def write_checkpoint_csv(rows: list[dict], path: Path) -> None:
         writer.writerows(rows)
 
 
-def plot_cartpole_old_vs_new(rows: list[dict], out_path: Path) -> None:
-    """Finding: two DQN/CartPole runs with byte-identical seed/config diverge
-    sharply at 1M steps.
+def _coerce_csv_row(raw: dict, str_fields: set, int_fields: set, nullable: bool = False) -> dict:
+    """Shared type-coercion for a csv.DictReader row: fields in str_fields
+    stay strings, fields in int_fields become int, everything else becomes
+    float. With nullable=True, "" / "None" become None (int fields) or NaN
+    (float fields) instead of raising.
     """
-    cp_rows = [r for r in rows if r["algo"] == "dqn" and r["env_id"] == "CartPole-v1"
-               and r["variant"] in ("old", "new")]
-    budgets = sorted({r["timesteps"] for r in cp_rows if r["timesteps"] <= 1_000_000})
-    if not budgets:
-        return
+    row = {}
+    for key, value in raw.items():
+        if key in str_fields:
+            row[key] = value
+        elif key in int_fields:
+            row[key] = int(value) if not (nullable and value in ("", "None")) else None
+        else:
+            row[key] = float(value) if not (nullable and value in ("", "None")) else float("nan")
+    return row
 
-    fig, axes = plt.subplots(1, len(budgets), figsize=(4.2 * len(budgets), 4), sharey=True)
-    if len(budgets) == 1:
-        axes = [axes]
 
-    for ax, budget in zip(axes, budgets):
-        for variant, color in [("new", "C0"), ("old", "C1")]:
-            row = next((r for r in cp_rows if r["timesteps"] == budget and r["variant"] == variant), None)
-            if row is None:
-                continue
-            ax.plot(row["eval_timesteps"], row["eval_means"], label=variant, color=color)
-        ax.set_title(f"{budget:,} steps")
-        ax.set_xlabel("Timesteps")
-        ax.legend(fontsize=8)
-    axes[0].set_ylabel("Mean eval reward (n=5, training-time)")
-    fig.suptitle("DQN/CartPole: old vs. retrained run -- same seed, same config.json")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
+def load_rows_from_csv(csv_path: Path, models_dir: Path) -> list[dict]:
+    """Lets default-mode plots be regenerated/added without rerunning the
+    expensive bias_stats/collapse_check computation.
+    """
+    int_fields = {"timesteps", "seed", "peak_timestep", "final_timestep", "best_saved_at_timesteps"}
+    str_fields = {"run_name", "variant", "algo", "env_id"}
 
+    rows = []
+    with open(csv_path) as f:
+        for raw in csv.DictReader(f):
+            row = _coerce_csv_row(raw, str_fields, int_fields, nullable=True)
+            npz_path = models_dir / row["run_name"] / "eval" / "evaluations.npz"
+            data = np.load(npz_path)
+            row["eval_timesteps"] = data["timesteps"]
+            row["eval_means"] = data["results"].mean(axis=1)
+            rows.append(row)
+    return rows
+
+
+def load_checkpoint_rows_from_csv(csv_path: Path) -> dict[str, list[dict]]:
+    """Regenerates the checkpoint-progression plots from a previously written
+    checkpoint_evaluation.csv, without reloading models or rerunning the
+    MC rollouts / re-evaluation that produced it. Grouped by run_name, since
+    more than one run_name can share an (algo, env_id).
+    """
+    int_fields = {"checkpoint_steps", "saved_at_timesteps"}
+    str_fields = {"run_name", "algo", "env_id"}
+
+    ckpt_rows_by_run: dict[str, list[dict]] = {}
+    with open(csv_path) as f:
+        for raw in csv.DictReader(f):
+            row = _coerce_csv_row(raw, str_fields, int_fields)
+            ckpt_rows_by_run.setdefault(row["run_name"], []).append(row)
+    return ckpt_rows_by_run
+
+
+# Plotting helpers
+
+def _format_timestep_ticks(x: float, _pos=None) -> str:
+    """Tick formatter for a linear timesteps axis: whole millions as '1M',
+    whole thousands as '200K', otherwise the raw number.
+    """
+    x = int(x)
+    if x == 0:
+        return "0"
+    if x % 1_000_000 == 0:
+        return f"{x // 1_000_000}M"
+    if x % 1_000 == 0:
+        return f"{x // 1_000}K"
+    return str(x)
+
+
+def _set_timestep_xaxis(ax) -> None:
+    ax.xaxis.set_major_formatter(FuncFormatter(_format_timestep_ticks))
+
+
+def checkpoint_series_labels(ckpt_rows_by_run: dict[str, list[dict]]) -> dict[str, str]:
+    """Maps each run_name to a plot label: plain "ALGO/ENV" when it's the
+    only run for that (algo, env_id), or "ALGO/ENV (tag)" when multiple
+    runs share it (see CHECKPOINT_TAG_LABELS).
+    """
+    run_names_by_group: dict[tuple[str, str], list[str]] = {}
+    for run_name, rows in ckpt_rows_by_run.items():
+        algo, env_id = rows[0]["algo"], rows[0]["env_id"]
+        run_names_by_group.setdefault((algo, env_id), []).append(run_name)
+
+    labels: dict[str, str] = {}
+    for (algo, env_id), run_names in run_names_by_group.items():
+        base = f"{algo.upper()}/{env_id}"
+        if len(run_names) == 1:
+            labels[run_names[0]] = base
+            continue
+        for run_name in run_names:
+            m = re.search(r"_seed\d+_*(.*)$", run_name)
+            tag = m.group(1) if m else ""
+            tag_label = CHECKPOINT_TAG_LABELS.get(tag, tag or "unlabeled")
+            labels[run_name] = f"{base} ({tag_label})"
+    return labels
+
+
+def select_canonical_checkpoint_runs(ckpt_rows_by_run: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """Picks one run_name per (algo, env_id), for plots that show a single
+    line per group rather than every known variant -- preferring the plain,
+    untagged run_name (bare "..._seed<N>", no extra suffix) when more than
+    one run shares a group. A plot that specifically wants to show every
+    variant (e.g. plot_cartpole_old_vs_new_checkpoints, which exists to
+    compare DQN/CartPole-v1's two separately-trained runs) should keep using
+    the full ckpt_rows_by_run instead of this.
+    """
+    by_group: dict[tuple[str, str], list[str]] = {}
+    for run_name, rows in ckpt_rows_by_run.items():
+        algo, env_id = rows[0]["algo"], rows[0]["env_id"]
+        by_group.setdefault((algo, env_id), []).append(run_name)
+
+    canonical: dict[str, list[dict]] = {}
+    for run_names in by_group.values():
+        if len(run_names) == 1:
+            chosen = run_names[0]
+        else:
+            bare = [r for r in run_names if re.search(r"_seed\d+$", r)]
+            chosen = bare[0] if bare else sorted(run_names)[0]
+        canonical[chosen] = ckpt_rows_by_run[chosen]
+    return canonical
+
+
+# =============================================================================
+# Plots: default (budget-comparison) mode
+# =============================================================================
 
 def plot_bias_direction(rows: list[dict], out_path: Path) -> None:
     """Finding: DQN's Q-value bias direction is opposite on CartPole
@@ -333,36 +439,6 @@ def plot_bias_direction(rows: list[dict], out_path: Path) -> None:
     ax.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
     ax.set_title("DQN bias direction: overestimation (Pendulum) vs.\nunderestimation (CartPole) are the same algorithm")
     ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
-def plot_collapse_signal_vs_noise(rows: list[dict], out_path: Path) -> None:
-    """Finding: most recorded peak-to-final collapses (SAC/TD3, and DQN's
-    own training curve in several cases) turn out to be eval-sampling noise
-    once independently re-evaluated with n=50 instead of the training-time
-    n=5. Only one run (DQN/CartPole 1M, new) survives as a real gap.
-    """
-    candidates = [r for r in rows if not np.isnan(r["reeval_degradation_sem_ratio"])]
-    if not candidates:
-        return
-    candidates = sorted(candidates, key=lambda r: abs(r["reeval_degradation_sem_ratio"]))
-
-    labels = [
-        f"{r['algo']}/{r['env_id']} {r['timesteps']:,}" + ("" if r["variant"] == "new" else f" [{r['variant']}]")
-        for r in candidates
-    ]
-    values = [r["reeval_degradation_sem_ratio"] for r in candidates]
-    colors = ["crimson" if abs(v) >= 2 else "gray" for v in values]
-
-    fig, ax = plt.subplots(figsize=(7, max(4, 0.4 * len(candidates))))
-    ax.barh(labels, values, color=colors)
-    ax.axvline(2, color="crimson", linestyle="--", linewidth=0.8)
-    ax.axvline(-2, color="crimson", linestyle="--", linewidth=0.8)
-    ax.axvline(0, color="black", linewidth=0.8)
-    ax.set_xlabel("best_model vs. final_model re-eval gap, in SEMs\n(beyond ±2 = likely real, not noise)")
-    ax.set_title("Which recorded peak-to-final collapses are real?")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -418,6 +494,7 @@ def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(9, 4))
     ax.plot(row["eval_timesteps"], row["eval_means"], color="C0", linewidth=0.9)
     ax.set_xlabel("Timesteps")
+    _set_timestep_xaxis(ax)
     ax.set_ylabel("Mean eval reward (n=5)")
     ax.set_title("DQN/CartPole (5M steps): performance never stabilizes")
     fig.tight_layout()
@@ -425,102 +502,41 @@ def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
     plt.close(fig)
 
 
-def plot_checkpoint_progression(all_ckpt_rows: dict[tuple[str, str], list[dict]], out_path: Path) -> None:
-    """Tracks Q-value bias (absolute and relative) and re-eval performance
-    across every saved checkpoint of the 1M-timestep runs (one per
-    (algo, env_id) group), giving a much finer-grained view of the training
-    trajectory than the 3-point (10k/100k/1M) approximation used elsewhere.
-
-    Absolute bias_mean is plotted next to relative_bias because
-    relative_bias = bias_mean / |mc_return_mean| spikes whenever a
-    checkpoint's return happens to be small -- which can mean a genuinely
-    worse Q-function, or just a checkpoint with an unusually bad episode
-    return diluting an otherwise-unremarkable bias. The absolute panel
-    disambiguates the two.
+def plot_collapse_signal_vs_noise(rows: list[dict], out_path: Path) -> None:
+    """Finding: most recorded peak-to-final collapses (SAC/TD3, and DQN's
+    own training curve in several cases) turn out to be eval-sampling noise
+    once independently re-evaluated with n=50 instead of the training-time
+    n=5. Only one run (DQN/CartPole 1M, new) survives as a real gap.
     """
-    fig, (ax0, ax1, ax2) = plt.subplots(1, 3, figsize=(18, 5))
+    candidates = [r for r in rows if not np.isnan(r["reeval_degradation_sem_ratio"])]
+    if not candidates:
+        return
+    candidates = sorted(candidates, key=lambda r: abs(r["reeval_degradation_sem_ratio"]))
 
-    for (algo, env_id), rows in all_ckpt_rows.items():
-        rows = sorted(rows, key=lambda r: r["checkpoint_steps"])
-        if not rows:
-            continue
-        label = f"{algo.upper()}/{env_id}"
-        steps = [r["checkpoint_steps"] for r in rows]
-        ax0.plot(steps, [r["bias_mean"] for r in rows], marker="o", label=label)
-        ax1.plot(steps, [r["relative_bias"] for r in rows], marker="o", label=label)
-        ax2.plot(steps, [r["reeval_mean"] for r in rows], marker="o", label=label)
+    labels = [
+        f"{r['algo']}/{r['env_id']} {r['timesteps']:,}" + ("" if r["variant"] == "new" else f" [{r['variant']}]")
+        for r in candidates
+    ]
+    values = [r["reeval_degradation_sem_ratio"] for r in candidates]
+    colors = ["crimson" if abs(v) >= 2 else "gray" for v in values]
 
-    ax0.axhline(0, color="gray", linestyle="--", linewidth=0.8)
-    ax0.set_xlabel("Timesteps")
-    ax0.set_ylabel("Q-value bias (bias_mean, absolute)")
-    ax0.set_title("Absolute Q-value bias over training\n(1M runs, every checkpoint)")
-    ax0.legend()
-
-    ax1.axhline(0, color="gray", linestyle="--", linewidth=0.8)
-    ax1.set_xlabel("Timesteps")
-    ax1.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
-    ax1.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
-    ax1.set_title("Relative Q-value bias over training\n(1M runs, every checkpoint)")
-    ax1.legend()
-
-    ax2.set_xlabel("Timesteps")
-    ax2.set_ylabel(f"Re-eval mean reward (n={RE_EVAL_N_EPISODES})")
-    ax2.set_title("Performance over training\n(1M runs, every checkpoint)")
-    ax2.legend()
-
+    fig, ax = plt.subplots(figsize=(7, max(4, 0.4 * len(candidates))))
+    ax.barh(labels, values, color=colors)
+    ax.axvline(2, color="crimson", linestyle="--", linewidth=0.8)
+    ax.axvline(-2, color="crimson", linestyle="--", linewidth=0.8)
+    ax.axvline(0, color="black", linewidth=0.8)
+    ax.set_xlabel("best_model vs. final_model re-eval gap, in SEMs\n(beyond ±2 = likely real, not noise)")
+    ax.set_title("Which recorded peak-to-final collapses are real?")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
 
-def load_checkpoint_rows_from_csv(csv_path: Path) -> dict[tuple[str, str], list[dict]]:
-    """Regenerates the checkpoint-progression plot from a previously written
-    checkpoint_evaluation.csv, without reloading models or rerunning the
-    MC rollouts / re-evaluation that produced it.
-    """
-    int_fields = {"checkpoint_steps", "saved_at_timesteps"}
-    str_fields = {"run_name", "algo", "env_id"}
-
-    ckpt_rows_by_group: dict[tuple[str, str], list[dict]] = {}
-    with open(csv_path) as f:
-        for raw in csv.DictReader(f):
-            row = {}
-            for key, value in raw.items():
-                if key in str_fields:
-                    row[key] = value
-                elif key in int_fields:
-                    row[key] = int(value)
-                else:
-                    row[key] = float(value)
-            ckpt_rows_by_group.setdefault((row["algo"], row["env_id"]), []).append(row)
-    return ckpt_rows_by_group
-
-
-def load_rows_from_csv(csv_path: Path, models_dir: Path) -> list[dict]:
-    """Lets plots be regenerated/added without rerunning the
-    expensive bias_stats/collapse_check computation.
-    """
-    int_fields = {"timesteps", "seed", "peak_timestep", "final_timestep", "best_saved_at_timesteps"}
-    str_fields = {"run_name", "variant", "algo", "env_id"}
-
-    rows = []
-    with open(csv_path) as f:
-        for raw in csv.DictReader(f):
-            row = {}
-            for key, value in raw.items():
-                if key in str_fields:
-                    row[key] = value
-                elif key in int_fields:
-                    row[key] = int(value) if value not in ("", "None") else None
-                else:
-                    row[key] = float(value) if value not in ("", "None") else float("nan")
-
-            npz_path = models_dir / row["run_name"] / "eval" / "evaluations.npz"
-            data = np.load(npz_path)
-            row["eval_timesteps"] = data["timesteps"]
-            row["eval_means"] = data["results"].mean(axis=1)
-            rows.append(row)
-    return rows
+def make_plots(rows: list[dict]) -> None:
+    plot_bias_direction(rows, RESULTS_DIR / "finding_bias_direction_cartpole_vs_pendulum.png")
+    plot_collapse_signal_vs_noise(rows, RESULTS_DIR / "finding_collapse_signal_vs_noise.png")
+    plot_cartpole_5M_oscillation(rows, RESULTS_DIR / "finding_cartpole_5M_oscillation.png")
+    plot_bias_consistency(rows, RESULTS_DIR / "finding_bias_consistency.png")
 
 
 def print_summary(rows: list[dict]) -> None:
@@ -552,10 +568,115 @@ def print_summary(rows: list[dict]) -> None:
                 )
 
 
-def print_checkpoint_summary(all_ckpt_rows: dict[tuple[str, str], list[dict]]) -> None:
-    for (algo, env_id), rows in all_ckpt_rows.items():
+def run_default_mode(plots_only: bool) -> None:
+    csv_path = RESULTS_DIR / "model_evaluation.csv"
+
+    if plots_only:
+        rows = load_rows_from_csv(csv_path, MODELS_DIR)
+    else:
+        run_dirs = sorted(p.parent for p in MODELS_DIR.glob("*/config.json"))
+        rows = [evaluate_run(run_dir) for run_dir in run_dirs]
+        write_csv(rows, csv_path)
+
+    make_plots(rows)
+
+    print_summary(rows)
+    print(f"\nCSV: {csv_path}")
+    print(f"Plots: {RESULTS_DIR}/*.png")
+
+
+# =============================================================================
+# Plots: --checkpoints mode
+# =============================================================================
+
+def plot_checkpoint_progression(all_ckpt_rows: dict[str, list[dict]], out_path: Path) -> None:
+    """Tracks relative Q-value bias and re-eval performance across every
+    saved checkpoint of the 1M-timestep runs, one line per (algo, env_id) --
+    when more than one run shares a group (e.g. DQN/CartPole-v1's two
+    separately-trained runs), only the canonical/untagged one is shown here
+    (see select_canonical_checkpoint_runs); use
+    plot_cartpole_old_vs_new_checkpoints for the full run-to-run comparison.
+    """
+    canonical = select_canonical_checkpoint_runs(all_ckpt_rows)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    for run_name, rows in canonical.items():
         rows = sorted(rows, key=lambda r: r["checkpoint_steps"])
-        print(f"\n=== {algo.upper()}/{env_id} checkpoint progression (1M run) ===")
+        if not rows:
+            continue
+        algo, env_id = rows[0]["algo"], rows[0]["env_id"]
+        label = f"{algo.upper()}/{env_id}"
+        steps = [r["checkpoint_steps"] for r in rows]
+        ax1.plot(steps, [r["relative_bias"] for r in rows], marker="o", label=label)
+        ax2.plot(steps, [r["reeval_mean"] for r in rows], marker="o", label=label)
+
+    ax1.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    ax1.set_xlabel("Timesteps")
+    _set_timestep_xaxis(ax1)
+    ax1.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
+    ax1.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
+    ax1.set_title("Relative Q-value bias over training\n(1M runs, every checkpoint)")
+    ax1.legend()
+
+    ax2.set_xlabel("Timesteps")
+    _set_timestep_xaxis(ax2)
+    ax2.set_ylabel(f"Re-eval mean reward (n={RE_EVAL_N_EPISODES})")
+    ax2.set_title("Performance over training\n(1M runs, every checkpoint)")
+    ax2.legend()
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_cartpole_old_vs_new_checkpoints(ckpt_rows_by_run: dict[str, list[dict]], out_path: Path) -> None:
+    """Replaces the old plot_cartpole_old_vs_new (which compared runs using
+    the training-time eval curve, n_eval_episodes=5) with one built from the
+    checkpoint CSV's independent re-evaluation (n=50 episodes, a fresh seed
+    not used anywhere during training) -- a far less noisy comparison of
+    every DQN/CartPole-v1 run_name found in the checkpoint data, whatever
+    they happen to be (an "_old" run, separately-trained runs sharing the
+    same config, etc; see CHECKPOINT_TAG_LABELS).
+
+    Finding: run A and run B are two separately-trained runs with identical
+    config.json (same algo/env/timesteps/seed), confirmed not to be the same
+    weights re-evaluated twice -- they diverge substantially at several
+    checkpoints (e.g. step 1M: 457 vs 273) despite the identical config, the
+    same training-instability signature as the original DQN/CartPole
+    "_old"-vs-new comparison this plot replaces.
+
+    Only covers the 1M-step budget, since that's what --checkpoints
+    evaluates -- unlike the plot it replaces, it has no 10k/100k comparison.
+    """
+    labels = checkpoint_series_labels(ckpt_rows_by_run)
+    cp_runs = {
+        run_name: rows for run_name, rows in ckpt_rows_by_run.items()
+        if rows and rows[0]["algo"] == "dqn" and rows[0]["env_id"] == "CartPole-v1"
+    }
+    if not cp_runs:
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for run_name, rows in cp_runs.items():
+        rows = sorted(rows, key=lambda r: r["checkpoint_steps"])
+        steps = [r["checkpoint_steps"] for r in rows]
+        ax.plot(steps, [r["reeval_mean"] for r in rows], marker="o", markersize=3, label=labels[run_name])
+
+    ax.set_xlabel("Timesteps")
+    _set_timestep_xaxis(ax)
+    ax.set_ylabel(f"Re-eval mean reward (n={RE_EVAL_N_EPISODES})")
+    ax.legend(fontsize=8)
+    fig.suptitle("DQN/CartPole-v1: two separately-trained runs, same config (n=50 re-eval)")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def print_checkpoint_summary(all_ckpt_rows: dict[str, list[dict]]) -> None:
+    labels = checkpoint_series_labels(all_ckpt_rows)
+    for run_name, rows in all_ckpt_rows.items():
+        rows = sorted(rows, key=lambda r: r["checkpoint_steps"])
+        print(f"\n=== {labels[run_name]} checkpoint progression ({run_name}) ===")
         for row in rows:
             print(
                 f"  steps={row['checkpoint_steps']:>8} | "
@@ -565,19 +686,12 @@ def print_checkpoint_summary(all_ckpt_rows: dict[tuple[str, str], list[dict]]) -
             )
 
 
-def make_plots(rows: list[dict]) -> None:
-    plot_cartpole_old_vs_new(rows, RESULTS_DIR / "finding_cartpole_old_vs_new.png")
-    plot_bias_direction(rows, RESULTS_DIR / "finding_bias_direction_cartpole_vs_pendulum.png")
-    plot_collapse_signal_vs_noise(rows, RESULTS_DIR / "finding_collapse_signal_vs_noise.png")
-    plot_cartpole_5M_oscillation(rows, RESULTS_DIR / "finding_cartpole_5M_oscillation.png")
-    plot_bias_consistency(rows, RESULTS_DIR / "finding_bias_consistency.png")
-
-
 def run_checkpoints_mode(plots_only: bool = False, csv_path: Optional[Path] = None) -> None:
     """Evaluates every saved checkpoint of the 1M-timestep runs (grouped by
-    (algo, env_id), since more than one run can share an algo -- e.g.
-    DQN/CartPole and DQN/Pendulum) and plots how bias and performance evolve
-    over the course of training.
+    run_name, since more than one run_name can share an (algo, env_id) --
+    e.g. DQN/CartPole and DQN/Pendulum, or two independent re-evaluations of
+    the same nominal run) and plots how bias and performance evolve over the
+    course of training.
 
     plots_only: regenerate the plot from the existing checkpoint_evaluation.csv
     instead of reloading every checkpoint .zip and rerunning MC rollouts +
@@ -596,7 +710,7 @@ def run_checkpoints_mode(plots_only: bool = False, csv_path: Optional[Path] = No
         plot_path = csv_path.with_name(f"finding_{csv_path.stem}.png")
 
     if plots_only:
-        ckpt_rows_by_group = load_checkpoint_rows_from_csv(csv_path)
+        ckpt_rows_by_run = load_checkpoint_rows_from_csv(csv_path)
     else:
         run_dirs_1m = []
         for cfg_path in MODELS_DIR.glob("*/config.json"):
@@ -605,27 +719,35 @@ def run_checkpoints_mode(plots_only: bool = False, csv_path: Optional[Path] = No
             if config["timesteps"] == 1_000_000:
                 run_dirs_1m.append(cfg_path.parent)
 
-        ckpt_rows_by_group: dict[tuple[str, str], list[dict]] = {}
+        ckpt_rows_by_run: dict[str, list[dict]] = {}
         all_ckpt_rows: list[dict] = []
         for run_dir in sorted(run_dirs_1m):
-            with open(run_dir / "config.json") as f:
-                config = json.load(f)
-            group = (config["algo"], config["env_id"])
             rows_for_run = evaluate_checkpoints(run_dir)
             if not rows_for_run:
                 print(f"Warnung: keine Checkpoints gefunden in {run_dir / 'checkpoints'}")
                 continue
-            ckpt_rows_by_group[group] = rows_for_run
+            ckpt_rows_by_run[run_dir.name] = rows_for_run
             all_ckpt_rows.extend(rows_for_run)
 
         write_checkpoint_csv(all_ckpt_rows, csv_path)
 
-    plot_checkpoint_progression(ckpt_rows_by_group, plot_path)
+    plot_checkpoint_progression(ckpt_rows_by_run, plot_path)
 
-    print_checkpoint_summary(ckpt_rows_by_group)
+    # Only meaningful against the full merged dataset (a teammate's partial
+    # --output run won't have every DQN/CartPole-v1 variant to compare).
+    if csv_path.name == "checkpoint_evaluation.csv":
+        cartpole_plot_path = RESULTS_DIR / "finding_cartpole_old_vs_new.png"
+        plot_cartpole_old_vs_new_checkpoints(ckpt_rows_by_run, cartpole_plot_path)
+        print(f"Plot: {cartpole_plot_path}")
+
+    print_checkpoint_summary(ckpt_rows_by_run)
     print(f"\nCSV: {csv_path}")
     print(f"Plot: {plot_path}")
 
+
+# =============================================================================
+# CLI
+# =============================================================================
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -659,22 +781,8 @@ def main() -> None:
             plots_only=args.plots_only,
             csv_path=Path(args.output) if args.output else None,
         )
-        return
-
-    csv_path = RESULTS_DIR / "model_evaluation.csv"
-
-    if args.plots_only:
-        rows = load_rows_from_csv(csv_path, MODELS_DIR)
     else:
-        run_dirs = sorted(p.parent for p in MODELS_DIR.glob("*/config.json"))
-        rows = [evaluate_run(run_dir) for run_dir in run_dirs]
-        write_csv(rows, csv_path)
-
-    make_plots(rows)
-
-    print_summary(rows)
-    print(f"\nCSV: {csv_path}")
-    print(f"Plots: {RESULTS_DIR}/*.png")
+        run_default_mode(plots_only=args.plots_only)
 
 
 if __name__ == "__main__":
