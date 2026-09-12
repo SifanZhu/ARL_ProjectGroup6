@@ -80,12 +80,13 @@ CHECKPOINT_TAG_LABELS = {
     "old": "old",
 }
 
-# True episode-reward bounds per environment
+# True best-possible episode reward per environment (worst-possible only
+# for CartPole-v1)
 #   CartPole-v1: +1 reward/step, max_episode_steps=500 -> [0, 500]
-#   Pendulum-v1: [-16.2736.., 0], times max_episode_steps=200
+#   Pendulum-v1: max reward is 0 as there are only negative "rewards"
 ENV_REWARD_BOUNDS = {
     "CartPole-v1": (0.0, 500.0),
-    "Pendulum-v1": (-(np.pi ** 2 + 0.1 * 8 ** 2 + 0.001 * 2 ** 2) * 200, 0.0),
+    "Pendulum-v1": (None, 0.0),
 }
 
 
@@ -486,8 +487,8 @@ def plot_checkpoint_progression(all_ckpt_rows: dict[str, list[dict]], out_path: 
     sharing that (algo, env_id) group, with a shaded +/-1 std band across those
     runs at each checkpoint_steps value.
 
-    The performance panel marks each environment's true min/max possible
-    episode reward.
+    The performance panel marks each environment's true best-possible
+    episode reward and the worst-possible one for CartPole-v1 only.
     """
     written: list[Path] = []
     for env_id, by_algo in sorted(_group_checkpoints_by_env_algo(all_ckpt_rows).items()):
@@ -518,15 +519,13 @@ def plot_checkpoint_progression(all_ckpt_rows: dict[str, list[dict]], out_path: 
         ax2.set_ylabel(f"Re-eval mean reward (n={RE_EVAL_N_EPISODES})")
         ax2.set_title(f"{env_id} performance over training\n(mean ±1 std across runs)")
         if env_id in ENV_REWARD_BOUNDS:
-            # Capture the data-driven range first: a distant true bound (e.g.
-            # Pendulum's -3255 floor vs. a typical -1500 worst case) would
-            # otherwise stretch the axis and compress the actual variation
-            # into a sliver of the plot. The exact value stays in the legend
-            # even when the line itself falls outside the visible range.
+            # Capture the data-driven range first, a true bound far outside
+            # it would otherwise stretch the axis.
             data_ylim = ax2.get_ylim()
             true_lo, true_hi = ENV_REWARD_BOUNDS[env_id]
             ax2.axhline(true_hi, color="seagreen", linestyle=":", linewidth=1.2, label=f"true max ({true_hi:.0f})")
-            ax2.axhline(true_lo, color="crimson", linestyle=":", linewidth=1.2, label=f"true min ({true_lo:.0f})")
+            if true_lo is not None:
+                ax2.axhline(true_lo, color="crimson", linestyle=":", linewidth=1.2, label=f"true min ({true_lo:.0f})")
             ax2.set_ylim(data_ylim)
         ax2.legend()
 
