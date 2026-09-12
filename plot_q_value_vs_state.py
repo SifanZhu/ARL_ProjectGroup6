@@ -290,7 +290,7 @@ def run_dqn_cartpole(
     run_dirs = [models_dir / f"dqn_CartPole-v1_steps{steps}_seed{seed}" for seed in seeds]
 
     if use_final_model:
-        models = [DQN.load(str(run_dir / "best_model")) for run_dir in run_dirs]
+        models = [DQN.load(str(run_dir / "final_model")) for run_dir in run_dirs]
         plot_dqn_cartpole_model(
             models, n_episodes,
             out_path=out_dir / "dqn_cartpole_q_vs_cart_position.png",
@@ -314,7 +314,7 @@ def run_dqn_pendulum(models_dir: Path, steps: int, seeds: List[int], n_episodes:
     models, per_seed_x, per_seed_buckets, per_seed_returns = [], [], [], []
     for seed in seeds:
         run_dir = models_dir / f"dqn_Pendulum-v1_steps{steps}_seed{seed}"
-        model = DQN.load(str(run_dir / "best_model"))
+        model = DQN.load(str(run_dir / "final_model"))
         env = DiscretizeActionWrapper(gym.make("Pendulum-v1"))
         obs_arr, actions, returns = collect_rollout_samples(model, env, n_episodes)
         env.close()
@@ -364,7 +364,7 @@ def run_continuous_pendulum(
     low_torque = high_torque = None
     for seed in seeds:
         run_dir = models_dir / f"{algo_name}_Pendulum-v1_steps{steps}_seed{seed}"
-        model = algo_cls.load(str(run_dir / "best_model"))
+        model = algo_cls.load(str(run_dir / "final_model"))
         env = gym.make("Pendulum-v1")
         obs_arr, actions, returns = collect_rollout_samples(model, env, n_episodes)
         if low_torque is None:  # identical action range for every seed on this env

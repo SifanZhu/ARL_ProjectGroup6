@@ -49,7 +49,7 @@ python plot_q_value_vs_state.py --dqn-cartpole-all-checkpoints
 # Only specific checkpoints of the chosen DQN/CartPole run (steps must match an existing model_<N>_steps.zip)
 python plot_q_value_vs_state.py --dqn-cartpole-checkpoints 100000 500000 1000000
 
-# Only the checkpoint sweep, skip the final_model plot
+# Only the checkpoint sweep, skip the final_model plot (flag name kept for backward compatibility)
 python plot_q_value_vs_state.py --dqn-cartpole-all-checkpoints --dqn-cartpole-skip-final-model
 ```
 
@@ -65,7 +65,7 @@ python plot_q_value_vs_state.py --dqn-cartpole-all-checkpoints --dqn-cartpole-sk
 | `--out-dir`                       | `plots`         | Output folder for the generated PNGs                            |
 | `--dqn-cartpole-all-checkpoints`  | off             | Also plot every checkpoint in the DQN/CartPole runs' `checkpoints/` folders |
 | `--dqn-cartpole-checkpoints N...` | none            | Plot only these specific DQN/CartPole checkpoint timesteps (overrides `--dqn-cartpole-all-checkpoints`) |
-| `--dqn-cartpole-skip-final-model` | off             | Skip the `final_model.zip` plot for DQN/CartPole                |
+| `--dqn-cartpole-skip-final-model` | off             | Skip the non-checkpoint `final_model.zip` plot for DQN/CartPole   |
 
 Each run folder actually used is `models/<run>_seed<seed>/` for every `seed` in
 `--seeds`, e.g. with the defaults: `dqn_CartPole-v1_steps1000000_seed0` ...
@@ -87,10 +87,11 @@ checkpoint.
 ## Model loading
 
 For every seed in `--seeds`, DQN/Pendulum, SAC, and TD3 always load
-`models/<run_name>_seed<seed>/final_model.zip` (the model saved at the end of
-training, not `best_model.zip` or an intermediate checkpoint). The resulting
-real-Q bin means and learned-Q curves are then averaged across seeds before
-plotting (see "Multi-seed averaging" below).
+`models/<run_name>_seed<seed>/best_model.zip` (the snapshot with the highest
+`EvalCallback` score seen during training, not `final_model.zip` or an
+intermediate checkpoint). The resulting real-Q bin means and learned-Q curves
+are then averaged across seeds before plotting (see "Multi-seed averaging"
+below).
 
 DQN/CartPole loads `final_model.zip` per seed by default too, but can
 additionally (or instead) load snapshots from
@@ -98,7 +99,15 @@ additionally (or instead) load snapshots from
 `--dqn-cartpole-all-checkpoints` / `--dqn-cartpole-checkpoints` /
 `--dqn-cartpole-skip-final-model`, e.g. to reproduce a "policy from iteration N"
 style progression across training -- each checkpoint plot is itself averaged
-over all `--seeds`.
+over all `--seeds`. Checkpoint files under `checkpoints/` are periodic,
+unevaluated training snapshots (`CheckpointCallback`), independent of
+`final_model.zip`.
+
+When `--dqn-cartpole-all-checkpoints` is used, only checkpoint steps present in
+**every** selected seed's `checkpoints/` folder are plotted
+(`discover_common_checkpoint_steps`) -- this matters because seeds can have
+been trained with a different `checkpoint_freq` (e.g. seed 0 at 10k vs. seeds
+1-4 at 50k steps), so not every seed has a file for every step.
 
 ## Multi-seed averaging
 
