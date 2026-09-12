@@ -74,3 +74,15 @@ models / rerunning Monte Carlo rollouts / re-evaluation):
 ```bash
 python evaluate_models.py --plots-only
 ```
+
+### Folder "Q-value_VS_State"
+
+Used to produce a Q-value-bias plot per trained agent (DQN/CartPole, DQN/Pendulum,
+SAC/Pendulum, TD3/Pendulum).
+
+Each agent is trained with 1M time steps over multiple training seeds
+(`--seeds`, default `0 1 2 3 4`).
+
+Then the plot is created by averaging the result over 5 seeds. 
+
+To run it, please read the plot_q_value-state.README.md.
