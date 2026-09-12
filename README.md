@@ -32,6 +32,8 @@ python train.py --algo dqn --timesteps 10000 100000 --seeds 0 1 2
 python train.py --algo sac td3 --env Pendulum-v1 --timesteps 100000 1000000
 ```
 
+The checkpoints of the trained models are missing, as they take up too much space.
+
 ## Instability analysis (`instability_analysis/evaluate_models.py`)
 
 Aims to answer "Can typical error/instability patterns be identified?" by
