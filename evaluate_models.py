@@ -1,26 +1,27 @@
 """
 "Lassen sich typische Fehler- oder Instabilitätsmuster identifizieren?"
 
-Two modes, sharing the same three measurement primitives:
+Evaluates every trained model under models/ in two ways:
 
-  Default mode: compares final_model/best_model across separately-trained
-  runs at different timestep budgets (10k/100k/1M/5M) for each (algo, env).
-  Since each budget is a completely separate training run, this is only a
-  coarse (3-4 point) approximation of a single run's time course.
+  - Per-budget: final_model/best_model of every separately-trained run
+    (10k/100k/1M/5M timesteps) for each  (algo, env) and written to
+    model_evaluation.csv. This is only a coarse (3-4 point) approximation
+    of a single run's time course, so it isn't plotted as a budget comparison
+    (exception: single 5M-step CartPole run since its training curve is
+    interesting by itself).
 
-  --checkpoints mode: walks every intermediate checkpoint
-  (models/<run>/checkpoints/model_<N>_steps.zip) of every 1M-timestep run
-  found under models/, giving a much finer-grained (every 10k-50k steps)
-  view of how bias and performance evolve over one continuous run. More
-  than one run can share an (algo, env_id); e.g. two independently
-  trained runs of DQN/CartPole-v1 with the same config.json (see
-  CHECKPOINT_TAG_LABELS).
+  - Checkpoint progression: every intermediate checkpoint
+    (models/<run>/checkpoints/model_<N>_steps.zip) of the 1M-timestep runs,
+    giving a finer-grained (every 10k-50k steps) view of how bias and
+    performance evolve over one continuous run. More than one run can share
+    an (algo, env_id) -> DQN/CartPole-v1 has two independently trained runs
+    with the same config.
 
-The three measurement primitives, used by both modes:
+The measurement primitives:
 
   1. Training-time eval curve (eval_curve_stats, reading
-     eval/evaluations.npz): SB3's EvalCallback, n_eval_episodes=5, run
-     during training.
+     eval/evaluations.npz): SB3's EvalCallback, n_eval_episodes=5, ran
+     during training. Per-budget only.
 
   2. Q-value bias via Monte-Carlo rollout (bias_stats_from_path /
      Qvalue_bias.estimate_bias_over_random_states): for n_states=50 random
@@ -29,10 +30,14 @@ The three measurement primitives, used by both modes:
      rollout actually achieved.
 
   3. Independent re-evaluation (re_evaluate): evaluate_policy with
-     n_eval_episodes=50 on a fresh seed never used during training,
-     specifically to check whether an apparent training-time collapse
-     (see collapse_check / plot_collapse_signal_vs_noise) survives
-     independent scrutiny.
+     n_eval_episodes=50 on a fresh seed never used during training.
+     Checks whether an apparent collapse in the noisy training-time
+     evaluation curve (best_model vs. final_model, as picked by SB3's
+     EvalCallback) survives being re-checked with more episodes and a
+     different seed. And, in checkpoint progression, its reeval_mean
+     cross-checks primitive #2's mc_return_mean (since the two use
+     different seeds and code paths, their agreement is what tells
+     an apparent instability apart from a fluke of one evaluation.
 """
 
 import argparse
@@ -41,7 +46,6 @@ import json
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
@@ -71,9 +75,17 @@ RE_EVAL_SEED = 777
 CHECKPOINT_STEPS_RE = re.compile(r"(\d+)_steps")
 
 CHECKPOINT_TAG_LABELS = {
-    "run_A": "run A",
+    "run_A": "seed 0",
     "run_B": "run B",
     "old": "old",
+}
+
+# True episode-reward bounds per environment
+#   CartPole-v1: +1 reward/step, max_episode_steps=500 -> [0, 500]
+#   Pendulum-v1: [-16.2736.., 0], times max_episode_steps=200
+ENV_REWARD_BOUNDS = {
+    "CartPole-v1": (0.0, 500.0),
+    "Pendulum-v1": (-(np.pi ** 2 + 0.1 * 8 ** 2 + 0.001 * 2 ** 2) * 200, 0.0),
 }
 
 
@@ -81,9 +93,8 @@ CHECKPOINT_TAG_LABELS = {
 
 def make_analysis_env(algo: str, env_id: str) -> gym.Env:
     """Builds an env matching how the model was actually trained. DQN on a
-    continuous-action env (Pendulum) was trained through DiscretizeActionWrapper
-    (see train.py), so bias/re-eval must use the same wrapper or actions
-    won't match what the network expects.
+    continuous-action env (Pendulum) was trained through DiscretizeActionWrapper,
+    so bias/re-eval must use the same wrapper.
     """
     env = gym.make(env_id)
     if algo == "dqn" and isinstance(env.action_space, spaces.Box):
@@ -132,19 +143,16 @@ def bias_stats_from_path(algo: str, env_id: str, model_path: Path) -> dict:
         "bias_std": float(bias.std()),
         "q_pred_mean": float(result["q_preds"].mean()),
         "mc_return_mean": mc_return_mean,
-        # bias normalized to the actual return magnitude, raw values are
-        # not comparable across different budgets/envs, since the
-        # achievable return scale itself varies a lot (e.g. untrained
-        # 10k model vs. 1M model)
+        # bias normalized to the actual return magnitude
         "relative_bias": bias_mean / abs(mc_return_mean) if mc_return_mean else float("nan"),
     }
 
 
 def re_evaluate(algo: str, env_id: str, model_path: Path) -> dict:
-    """Independently re-evaluates a saved checkpoint: fresh seed (not the
-    training-time eval seed), many more episodes than the n_eval_episodes=5
-    used during training. Also reports the checkpoint's own num_timesteps,
-    a free cross-check against the peak_timestep read from evaluations.npz.
+    """Independently re-evaluates a saved checkpoint: fresh seed, more episodes
+    than the n_eval_episodes=5 used during training. Also reports the checkpoint's
+    own num_timesteps, a free cross-check against the peak_timestep read from
+    evaluations.npz.
     """
     model = ALGOS[algo].load(model_path)
     env = make_analysis_env(algo, env_id)
@@ -179,9 +187,7 @@ def collapse_check(algo: str, env_id: str, run_dir: Path) -> dict:
     final = re_evaluate(algo, env_id, run_dir / "final_model")
 
     degradation = best["reeval_mean"] - final["reeval_mean"]
-    # standard error of the mean for each side, combined -- a rough signal-
-    # to-noise indicator (how many "SEMs" apart the two means are), not a
-    # formal significance test.
+    # standard error of the mean for each side, combined
     sem_best = best["reeval_std"] / (RE_EVAL_N_EPISODES ** 0.5)
     sem_final = final["reeval_std"] / (RE_EVAL_N_EPISODES ** 0.5)
     combined_sem = (sem_best ** 2 + sem_final ** 2) ** 0.5
@@ -237,8 +243,7 @@ def find_checkpoints(run_dir: Path) -> list[tuple[int, Path]]:
 def evaluate_checkpoints(run_dir: Path) -> list[dict]:
     """Walks every saved checkpoint of a single run and computes bias +
     re-eval performance at each one, giving a fine-grained (every 50k, plus
-    an initial 10k point) view of how the run evolved -- rather than just
-    the 3-point (10k/100k/1M) approximation across separate runs.
+    an initial 10k point) view of how the run evolved.
     """
     with open(run_dir / "config.json") as f:
         config = json.load(f)
@@ -364,7 +369,7 @@ def _set_timestep_xaxis(ax) -> None:
 def checkpoint_series_labels(ckpt_rows_by_run: dict[str, list[dict]]) -> dict[str, str]:
     """Maps each run_name to a plot label: plain "ALGO/ENV" when it's the
     only run for that (algo, env_id), or "ALGO/ENV (tag)" when multiple
-    runs share it (see CHECKPOINT_TAG_LABELS).
+    runs share it.
     """
     run_names_by_group: dict[tuple[str, str], list[str]] = {}
     for run_name, rows in ckpt_rows_by_run.items():
@@ -378,102 +383,24 @@ def checkpoint_series_labels(ckpt_rows_by_run: dict[str, list[dict]]) -> dict[st
             labels[run_names[0]] = base
             continue
         for run_name in run_names:
-            m = re.search(r"_seed\d+_*(.*)$", run_name)
-            tag = m.group(1) if m else ""
-            tag_label = CHECKPOINT_TAG_LABELS.get(tag, tag or "unlabeled")
+            m = re.search(r"_seed(\d+)_*(.*)$", run_name)
+            seed_num, tag = (m.group(1), m.group(2)) if m else (None, "")
+            if tag in CHECKPOINT_TAG_LABELS:
+                tag_label = CHECKPOINT_TAG_LABELS[tag]
+            elif not tag and seed_num is not None:
+                tag_label = f"seed {seed_num}"
+            else:
+                tag_label = tag or "unlabeled"
             labels[run_name] = f"{base} ({tag_label})"
     return labels
 
 
-# Plots: default (budget-comparison) mode
-
-def _aggregate_new_by_budget(
-    rows: list[dict], algo: str, env_id: str, value_key: str
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Groups 'new'-variant rows for (algo, env_id) by training budget and
-    aggregates value_key across seeds sharing that budget.
-
-    Returns (budgets, means, lo, hi), all sorted by budget.
-    """
-    by_budget = defaultdict(list)
-    for r in rows:
-        if r["algo"] == algo and r["env_id"] == env_id and r["variant"] == "new":
-            by_budget[r["timesteps"]].append(r[value_key])
-
-    budgets = np.array(sorted(by_budget))
-    means = np.array([np.mean(by_budget[b]) for b in budgets])
-    lo = np.array([np.min(by_budget[b]) for b in budgets])
-    hi = np.array([np.max(by_budget[b]) for b in budgets])
-    return budgets, means, lo, hi
-
-
-def plot_bias_direction(rows: list[dict], out_path: Path) -> None:
-    """Finding: DQN's Q-value bias direction is opposite on CartPole
-    (underestimates for most of training) vs. Pendulum (overestimates for
-    most of training).
-
-    Budgets with more than one seed are aggregated:
-    mean line, shaded band spans the observed min-max across seeds.
-    """
-    groups = [("dqn", "CartPole-v1", "DQN / CartPole"), ("dqn", "Pendulum-v1", "DQN / Pendulum")]
-    fig, ax = plt.subplots(figsize=(7, 5))
-
-    for algo, env_id, label in groups:
-        budgets, means, lo, hi = _aggregate_new_by_budget(rows, algo, env_id, "relative_bias")
-        if len(budgets) == 0:
-            continue
-        line, = ax.plot(budgets, means, marker="o", label=label)
-        ax.fill_between(budgets, lo, hi, color=line.get_color(), alpha=0.2, linewidth=0)
-
-    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
-    ax.set_xscale("log")
-    ax.set_xlabel("Training budget (timesteps, log scale)")
-    ax.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
-    ax.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
-    ax.set_title("DQN bias direction: overestimation (Pendulum) vs.\nunderestimation (CartPole) are the same algorithm")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
-def plot_bias_consistency(rows: list[dict], out_path: Path) -> None:
-    """Finding: bias_std shows a different kind of instability than bias
-    direction/magnitude.
-
-    Budgets with more than one seed are aggregated:
-    mean line, shaded band spans the observed min-max across seeds.
-    """
-    groups = [
-        ("dqn", "CartPole-v1", "DQN / CartPole"),
-        ("dqn", "Pendulum-v1", "DQN / Pendulum"),
-        ("sac", "Pendulum-v1", "SAC / Pendulum"),
-        ("td3", "Pendulum-v1", "TD3 / Pendulum"),
-    ]
-    fig, ax = plt.subplots(figsize=(7, 5))
-
-    for algo, env_id, label in groups:
-        budgets, means, lo, hi = _aggregate_new_by_budget(rows, algo, env_id, "bias_std")
-        if len(budgets) == 0:
-            continue
-        line, = ax.plot(budgets, means, marker="o", label=label)
-        ax.fill_between(budgets, lo, hi, color=line.get_color(), alpha=0.2, linewidth=0)
-
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("Training budget (timesteps, log scale)")
-    ax.set_ylabel("bias_std across sampled states (log scale)")
-    ax.set_title("Consistency of the Q-value miscalibration:\nsystematic (low) vs. erratic (high) across states")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
+# Plots: per-budget
 
 def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
     """Finding: the 5M-step DQN/CartPole run never stabilizes, it hits a
-    perfect score as late as ~2M steps, then crashes and keeps oscillating
-    through the very end of training.
+    perfect score at around 2M steps, then crashes and keeps oscillating
+    through the end of training.
     """
     row = next(
         (r for r in rows if r["algo"] == "dqn" and r["env_id"] == "CartPole-v1"
@@ -492,51 +419,6 @@ def plot_cartpole_5M_oscillation(rows: list[dict], out_path: Path) -> None:
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
-
-
-def plot_collapse_signal_vs_noise(rows: list[dict], out_path: Path) -> None:
-    """Finding: most recorded peak-to-final collapses (SAC/TD3, and DQN's
-    own training curve in several cases) turn out to be eval-sampling noise
-    once independently re-evaluated with n=50 instead of the training-time
-    n=5. Only one run (DQN/CartPole 1M, new) survives as a real gap.
-    """
-    candidates = [r for r in rows if not np.isnan(r["reeval_degradation_sem_ratio"])]
-    if not candidates:
-        return
-    candidates = sorted(candidates, key=lambda r: abs(r["reeval_degradation_sem_ratio"]))
-
-    def base_label(r: dict) -> str:
-        return f"{r['algo']}/{r['env_id']} {r['timesteps']:,}" + ("" if r["variant"] == "new" else f" [{r['variant']}]")
-
-    # Budgets with more than one seed need the
-    # seed appended so each one gets its own row.
-    base_counts: dict[str, int] = defaultdict(int)
-    for r in candidates:
-        base_counts[base_label(r)] += 1
-    labels = [
-        base_label(r) + (f" (seed {r['seed']})" if base_counts[base_label(r)] > 1 else "")
-        for r in candidates
-    ]
-    values = [r["reeval_degradation_sem_ratio"] for r in candidates]
-    colors = ["crimson" if abs(v) >= 2 else "gray" for v in values]
-
-    fig, ax = plt.subplots(figsize=(7, max(4, 0.4 * len(candidates))))
-    ax.barh(labels, values, color=colors)
-    ax.axvline(2, color="crimson", linestyle="--", linewidth=0.8)
-    ax.axvline(-2, color="crimson", linestyle="--", linewidth=0.8)
-    ax.axvline(0, color="black", linewidth=0.8)
-    ax.set_xlabel("best_model vs. final_model re-eval gap, in SEMs\n(beyond ±2 = likely real, not noise)")
-    ax.set_title("Which recorded peak-to-final collapses are real?")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
-def make_plots(rows: list[dict]) -> None:
-    plot_bias_direction(rows, RESULTS_DIR / "finding_bias_direction_cartpole_vs_pendulum.png")
-    plot_collapse_signal_vs_noise(rows, RESULTS_DIR / "finding_collapse_signal_vs_noise.png")
-    plot_cartpole_5M_oscillation(rows, RESULTS_DIR / "finding_cartpole_5M_oscillation.png")
-    plot_bias_consistency(rows, RESULTS_DIR / "finding_bias_consistency.png")
 
 
 def print_summary(rows: list[dict]) -> None:
@@ -568,101 +450,134 @@ def print_summary(rows: list[dict]) -> None:
                 )
 
 
-def run_default_mode(plots_only: bool) -> None:
-    csv_path = RESULTS_DIR / "model_evaluation.csv"
+# Plots: checkpoint progression
 
-    if plots_only:
-        rows = load_rows_from_csv(csv_path, MODELS_DIR)
-    else:
-        run_dirs = sorted(p.parent for p in MODELS_DIR.glob("*/config.json"))
-        rows = [evaluate_run(run_dir) for run_dir in run_dirs]
-        write_csv(rows, csv_path)
-
-    make_plots(rows)
-
-    print_summary(rows)
-    print(f"\nCSV: {csv_path}")
-    print(f"Plots: {RESULTS_DIR}/*.png")
-
-
-# Plots: --checkpoints mode
-
-def plot_checkpoint_progression(all_ckpt_rows: dict[str, list[dict]], out_path: Path) -> None:
-    """Tracks relative Q-value bias and re-eval performance across every
-    saved checkpoint of the 1M-timestep runs, one line per (algo, env_id),
-    averaged across every run_name sharing that group (e.g. seeds 0-4, or
-    DQN/CartPole-v1's run_A/run_B/seed1-4), with a shaded +/-1 std band
-    across those runs at each checkpoint_steps value. A checkpoint_steps
-    value not shared by every run (e.g. run_A's coarser ~50k-step grid vs.
-    others' 10k grid) is still averaged, just over however many runs
-    actually report it. See plot_cartpole_old_vs_new_checkpoints for the
-    individual per-run comparison this collapses.
+def _group_checkpoints_by_env_algo(
+    all_ckpt_rows: dict[str, list[dict]],
+) -> dict[str, dict[str, dict[int, list[dict]]]]:
+    """(env_id -> algo -> checkpoint_steps -> rows), merging every run_name
+    sharing an (algo, env_id) group (e.g. seeds 0-4, or DQN/CartPole-v1's
+    run_A/run_B/seed1-4) so callers can average across them.
     """
-    groups: dict[tuple[str, str], dict[int, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    by_env: dict[str, dict[str, dict[int, list[dict]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for rows in all_ckpt_rows.values():
         for row in rows:
-            groups[(row["algo"], row["env_id"])][row["checkpoint_steps"]].append(row)
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
-    for (algo, env_id), by_step in sorted(groups.items()):
-        steps = sorted(by_step)
-        label = f"{algo.upper()}/{env_id}"
-
-        def mean_std(field: str) -> tuple[np.ndarray, np.ndarray]:
-            values = [[r[field] for r in by_step[s]] for s in steps]
-            return np.array([np.mean(v) for v in values]), np.array([np.std(v) for v in values])
-
-        bias_mean, bias_std = mean_std("relative_bias")
-        line1, = ax1.plot(steps, bias_mean, marker="o", label=label)
-        ax1.fill_between(steps, bias_mean - bias_std, bias_mean + bias_std, color=line1.get_color(), alpha=0.2)
-
-        reeval_mean, reeval_std = mean_std("reeval_mean")
-        line2, = ax2.plot(steps, reeval_mean, marker="o", label=label)
-        ax2.fill_between(steps, reeval_mean - reeval_std, reeval_mean + reeval_std, color=line2.get_color(), alpha=0.2)
-
-    ax1.axhline(0, color="gray", linestyle="--", linewidth=0.8)
-    ax1.set_xlabel("Timesteps")
-    _set_timestep_xaxis(ax1)
-    ax1.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
-    ax1.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
-    ax1.set_title("Relative Q-value bias over training\n(1M runs, mean ±1 std across runs)")
-    ax1.legend()
-
-    ax2.set_xlabel("Timesteps")
-    _set_timestep_xaxis(ax2)
-    ax2.set_ylabel(f"Re-eval mean reward (n={RE_EVAL_N_EPISODES})")
-    ax2.set_title("Performance over training\n(1M runs, mean ±1 std across runs)")
-    ax2.legend()
-
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
+            by_env[row["env_id"]][row["algo"]][row["checkpoint_steps"]].append(row)
+    return by_env
 
 
-def plot_cartpole_old_vs_new_checkpoints(ckpt_rows_by_run: dict[str, list[dict]], out_path: Path) -> None:
-    """Replaces the old plot_cartpole_old_vs_new (which compared runs using
-    the training-time eval curve, n_eval_episodes=5) with one built from the
-    checkpoint CSV's independent re-evaluation (n=50 episodes, a fresh seed
-    not used anywhere during training) -- a far less noisy comparison of
-    every DQN/CartPole-v1 run_name found in the checkpoint data, whatever
-    they happen to be (an "_old" run, separately-trained runs sharing the
-    same config, etc; see CHECKPOINT_TAG_LABELS).
+def _mean_std_series(by_step: dict[int, list[dict]], steps: list[int], field: str) -> tuple[np.ndarray, np.ndarray]:
+    values = [[r[field] for r in by_step[s]] for s in steps]
+    return np.array([np.mean(v) for v in values]), np.array([np.std(v) for v in values])
 
-    Finding: run A and run B are two separately-trained runs with identical
-    config.json (same algo/env/timesteps/seed), confirmed not to be the same
-    weights re-evaluated twice -- they diverge substantially at several
-    checkpoints (e.g. step 1M: 457 vs 273) despite the identical config, the
-    same training-instability signature as the original DQN/CartPole
-    "_old"-vs-new comparison this plot replaces.
 
-    Only covers the 1M-step budget, since that's what --checkpoints
-    evaluates -- unlike the plot it replaces, it has no 10k/100k comparison.
+def _env_slug(env_id: str) -> str:
+    return re.sub(r"-v\d+$", "", env_id).lower()
+
+
+def _env_plot_path(out_path: Path, env_id: str, suffix: str = "") -> Path:
+    return out_path.with_name(f"{out_path.stem}{suffix}_{_env_slug(env_id)}{out_path.suffix}")
+
+
+def plot_checkpoint_progression(all_ckpt_rows: dict[str, list[dict]], out_path: Path) -> list[Path]:
+    """Tracks relative Q-value bias and re-eval performance across every
+    saved checkpoint of the 1M-timestep runs. Algos sharing an environment
+    plotted together on the same axes, each line averaged across every run_name
+    sharing that (algo, env_id) group, with a shaded +/-1 std band across those
+    runs at each checkpoint_steps value.
+
+    The performance panel marks each environment's true min/max possible
+    episode reward.
+    """
+    written: list[Path] = []
+    for env_id, by_algo in sorted(_group_checkpoints_by_env_algo(all_ckpt_rows).items()):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+        for algo, by_step in sorted(by_algo.items()):
+            steps = sorted(by_step)
+            label = algo.upper()
+
+            rel_mean, rel_std = _mean_std_series(by_step, steps, "relative_bias")
+            line1, = ax1.plot(steps, rel_mean, marker="o", label=label)
+            ax1.fill_between(steps, rel_mean - rel_std, rel_mean + rel_std, color=line1.get_color(), alpha=0.2)
+
+            reeval_mean, reeval_std = _mean_std_series(by_step, steps, "reeval_mean")
+            line2, = ax2.plot(steps, reeval_mean, marker="o", label=label)
+            ax2.fill_between(steps, reeval_mean - reeval_std, reeval_mean + reeval_std, color=line2.get_color(), alpha=0.2)
+
+        ax1.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+        ax1.set_xlabel("Timesteps")
+        _set_timestep_xaxis(ax1)
+        ax1.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
+        ax1.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
+        ax1.set_title("Relative Q-value bias over training\n(mean ±1 std across runs)")
+        ax1.legend()
+
+        ax2.set_xlabel("Timesteps")
+        _set_timestep_xaxis(ax2)
+        ax2.set_ylabel(f"Re-eval mean reward (n={RE_EVAL_N_EPISODES})")
+        ax2.set_title(f"{env_id} performance over training\n(mean ±1 std across runs)")
+        if env_id in ENV_REWARD_BOUNDS:
+            # Capture the data-driven range first: a distant true bound (e.g.
+            # Pendulum's -3255 floor vs. a typical -1500 worst case) would
+            # otherwise stretch the axis and compress the actual variation
+            # into a sliver of the plot. The exact value stays in the legend
+            # even when the line itself falls outside the visible range.
+            data_ylim = ax2.get_ylim()
+            true_lo, true_hi = ENV_REWARD_BOUNDS[env_id]
+            ax2.axhline(true_hi, color="seagreen", linestyle=":", linewidth=1.2, label=f"true max ({true_hi:.0f})")
+            ax2.axhline(true_lo, color="crimson", linestyle=":", linewidth=1.2, label=f"true min ({true_lo:.0f})")
+            ax2.set_ylim(data_ylim)
+        ax2.legend()
+
+        fig.tight_layout()
+        env_path = _env_plot_path(out_path, env_id)
+        fig.savefig(env_path, dpi=150)
+        plt.close(fig)
+        written.append(env_path)
+
+    return written
+
+
+def plot_checkpoint_absolute_bias(all_ckpt_rows: dict[str, list[dict]], out_path: Path) -> list[Path]:
+    """Absolute (raw, un-normalized) Q-value bias over training, one figure
+    per environment.
+    """
+    written: list[Path] = []
+    for env_id, by_algo in sorted(_group_checkpoints_by_env_algo(all_ckpt_rows).items()):
+        fig, ax = plt.subplots(figsize=(7, 5))
+
+        for algo, by_step in sorted(by_algo.items()):
+            steps = sorted(by_step)
+            abs_mean, abs_std = _mean_std_series(by_step, steps, "bias_mean")
+            line, = ax.plot(steps, abs_mean, marker="o", label=algo.upper())
+            ax.fill_between(steps, abs_mean - abs_std, abs_mean + abs_std, color=line.get_color(), alpha=0.2)
+
+        ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+        ax.set_xlabel("Timesteps")
+        _set_timestep_xaxis(ax)
+        ax.set_ylabel("Absolute Q-value bias (bias_mean, raw reward units)")
+        ax.set_title(f"{env_id}: absolute Q-value bias over training\n(mean ±1 std across runs)")
+        ax.legend()
+
+        fig.tight_layout()
+        env_path = _env_plot_path(out_path, env_id, suffix="_absolute_bias")
+        fig.savefig(env_path, dpi=150)
+        plt.close(fig)
+        written.append(env_path)
+
+    return written
+
+
+def plot_cartpole_seed_comparison(ckpt_rows_by_run: dict[str, list[dict]], out_path: Path) -> None:
+    """Built from the checkpoint CSV's independent re-evaluation (n=50
+    episodes, a fresh seed not used during training).
     """
     labels = checkpoint_series_labels(ckpt_rows_by_run)
     cp_runs = {
         run_name: rows for run_name, rows in ckpt_rows_by_run.items()
         if rows and rows[0]["algo"] == "dqn" and rows[0]["env_id"] == "CartPole-v1"
+        and not run_name.endswith("__run_B")
     }
     if not cp_runs:
         return
@@ -677,10 +592,83 @@ def plot_cartpole_old_vs_new_checkpoints(ckpt_rows_by_run: dict[str, list[dict]]
     _set_timestep_xaxis(ax)
     ax.set_ylabel(f"Re-eval mean reward (n={RE_EVAL_N_EPISODES})")
     ax.legend(fontsize=8)
-    fig.suptitle("DQN/CartPole-v1: two separately-trained runs, same config (n=50 re-eval)")
+    fig.suptitle("DQN/CartPole-v1: performance across seeds (n=50 re-eval)")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
+
+
+def plot_td3_seed0_collapse_case_study(ckpt_rows_by_run: dict[str, list[dict]], out_path: Path) -> bool:
+    """Case study for the isolated TD3/Pendulum-v1 seed0 collapse (bias_mean,
+    q_pred_mean, mc_return_mean and reeval_mean all spike simultaneously at
+    one checkpoint, fully recovered by the next one 50k steps later).
+
+    Left panel: reeval_mean +/-1 std across every checkpoint, isolating the
+    single anomalous point. Right panel: raw training episode rewards in the
+    window between the checkpoints just before/after the anomaly, with the
+    worst episode marked.
+    """
+    run_name = "td3_Pendulum-v1_steps1000000_seed0"
+    rows = ckpt_rows_by_run.get(run_name)
+    if not rows:
+        return False
+    rows = sorted(rows, key=lambda r: r["checkpoint_steps"])
+    steps = [r["checkpoint_steps"] for r in rows]
+    reeval_mean = [r["reeval_mean"] for r in rows]
+    reeval_std = [r["reeval_std"] for r in rows]
+
+    med = float(np.median(reeval_std))
+    mad = float(np.median([abs(v - med) for v in reeval_std])) or 1e-9
+    outlier_idx = max(range(len(rows)), key=lambda i: abs(reeval_std[i] - med))
+    if abs(reeval_std[outlier_idx] - med) < 6 * mad:
+        return False
+    outlier_step = steps[outlier_idx]
+
+    monitor_path = MODELS_DIR / run_name / "monitor" / "monitor.csv"
+    if not monitor_path.exists():
+        return False
+
+    with open(monitor_path) as f:
+        f.readline()  # SB3 writes a json comment as the first line
+        episode_rows = list(csv.DictReader(f))
+    cum = 0
+    episodes = []
+    for r in episode_rows:
+        cum += int(float(r["l"]))
+        episodes.append((cum, float(r["r"])))
+
+    window_lo = steps[outlier_idx - 1] if outlier_idx > 0 else max(0, outlier_step - 50_000)
+    window_hi = steps[outlier_idx + 1] if outlier_idx + 1 < len(steps) else outlier_step + 50_000
+    window = [(t, r) for t, r in episodes if window_lo <= t <= window_hi]
+    if not window:
+        return False
+    worst_t, worst_r = min(window, key=lambda tr: tr[1])
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    ax1.errorbar(steps, reeval_mean, yerr=reeval_std, marker="o", markersize=4, capsize=3)
+    ax1.scatter([outlier_step], [reeval_mean[outlier_idx]], color="crimson", zorder=5, label="anomalous checkpoint")
+    ax1.set_xlabel("Timesteps")
+    _set_timestep_xaxis(ax1)
+    ax1.set_ylabel(f"Re-eval mean reward ±1 std (n={RE_EVAL_N_EPISODES})")
+    ax1.set_title(f"TD3/Pendulum-v1 seed0: checkpoint re-eval\n(anomaly at step {outlier_step:,})")
+    ax1.legend()
+
+    win_t = [t for t, _ in window]
+    win_r = [r for _, r in window]
+    ax2.plot(win_t, win_r, linewidth=0.8, color="C0")
+    ax2.scatter([worst_t], [worst_r], color="crimson", zorder=5, label=f"worst episode ({worst_r:.0f})")
+    ax2.axvline(outlier_step, color="gray", linestyle="--", linewidth=0.8, label=f"checkpoint saved ({outlier_step:,})")
+    ax2.set_xlabel("Timesteps (training)")
+    _set_timestep_xaxis(ax2)
+    ax2.set_ylabel("Per-episode training reward")
+    ax2.set_title("Raw training log around the anomaly\n(independent of any evaluation code)")
+    ax2.legend()
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return True
 
 
 def print_checkpoint_summary(all_ckpt_rows: dict[str, list[dict]]) -> None:
@@ -697,42 +685,31 @@ def print_checkpoint_summary(all_ckpt_rows: dict[str, list[dict]]) -> None:
             )
 
 
-def run_checkpoints_mode(plots_only: bool = False, csv_path: Optional[Path] = None) -> None:
-    """Evaluates every saved checkpoint of the 1M-timestep runs (grouped by
-    run_name, since more than one run_name can share an (algo, env_id) --
-    e.g. DQN/CartPole and DQN/Pendulum, or two independent re-evaluations of
-    the same nominal run) and plots how bias and performance evolve over the
-    course of training.
+def run(plots_only: bool) -> None:
+    """Evaluates every trained model under models/ (or, with plots_only,
+    just reloads the two CSVs below) and regenerates every plot.
 
-    plots_only: regenerate the plot from the existing checkpoint_evaluation.csv
-    instead of reloading every checkpoint .zip and rerunning MC rollouts +
-    re-evaluation (which requires the models/*/checkpoints/ directories to
-    still exist on disk).
-
-    csv_path: write/read the checkpoint CSV here instead of the default
-    results/checkpoint_evaluation.csv -- e.g. so a teammate evaluating their
-    own local checkpoints doesn't overwrite the shared CSV, and can hand back
-    a separate file to be merged in by hand.
+    Writes/reads results/model_evaluation.csv (final_model/best_model per
+    budget) and results/checkpoint_evaluation.csv (every checkpoint of the
+    1M-timestep runs).
     """
-    if csv_path is None:
-        csv_path = RESULTS_DIR / "checkpoint_evaluation.csv"
-        plot_path = RESULTS_DIR / "finding_checkpoint_progression.png"
-    else:
-        plot_path = csv_path.with_name(f"finding_{csv_path.stem}.png")
+    model_csv_path = RESULTS_DIR / "model_evaluation.csv"
+    checkpoint_csv_path = RESULTS_DIR / "checkpoint_evaluation.csv"
 
     if plots_only:
-        ckpt_rows_by_run = load_checkpoint_rows_from_csv(csv_path)
+        rows = load_rows_from_csv(model_csv_path, MODELS_DIR)
+        ckpt_rows_by_run = load_checkpoint_rows_from_csv(checkpoint_csv_path)
     else:
-        run_dirs_1m = []
-        for cfg_path in MODELS_DIR.glob("*/config.json"):
-            with open(cfg_path) as f:
-                config = json.load(f)
-            if config["timesteps"] == 1_000_000:
-                run_dirs_1m.append(cfg_path.parent)
+        run_dirs = sorted(p.parent for p in MODELS_DIR.glob("*/config.json"))
+        rows = [evaluate_run(run_dir) for run_dir in run_dirs]
+        write_csv(rows, model_csv_path)
 
         ckpt_rows_by_run: dict[str, list[dict]] = {}
         all_ckpt_rows: list[dict] = []
-        for run_dir in sorted(run_dirs_1m):
+        for row in rows:
+            if row["timesteps"] != 1_000_000:
+                continue
+            run_dir = MODELS_DIR / row["run_name"]
             rows_for_run = evaluate_checkpoints(run_dir)
             if not rows_for_run:
                 print(f"Warnung: keine Checkpoints gefunden in {run_dir / 'checkpoints'}")
@@ -740,20 +717,27 @@ def run_checkpoints_mode(plots_only: bool = False, csv_path: Optional[Path] = No
             ckpt_rows_by_run[run_dir.name] = rows_for_run
             all_ckpt_rows.extend(rows_for_run)
 
-        write_checkpoint_csv(all_ckpt_rows, csv_path)
+        write_checkpoint_csv(all_ckpt_rows, checkpoint_csv_path)
 
-    plot_checkpoint_progression(ckpt_rows_by_run, plot_path)
+    plot_cartpole_5M_oscillation(rows, RESULTS_DIR / "finding_cartpole_5M_oscillation.png")
+    checkpoint_plot_path = RESULTS_DIR / "finding_checkpoint_progression.png"
+    written_plots = plot_checkpoint_progression(ckpt_rows_by_run, checkpoint_plot_path)
+    written_plots += plot_checkpoint_absolute_bias(ckpt_rows_by_run, checkpoint_plot_path)
 
-    # Only meaningful against the full merged dataset (a teammate's partial
-    # --output run won't have every DQN/CartPole-v1 variant to compare).
-    if csv_path.name == "checkpoint_evaluation.csv":
-        cartpole_plot_path = RESULTS_DIR / "finding_cartpole_old_vs_new.png"
-        plot_cartpole_old_vs_new_checkpoints(ckpt_rows_by_run, cartpole_plot_path)
-        print(f"Plot: {cartpole_plot_path}")
+    cartpole_plot_path = RESULTS_DIR / "finding_cartpole_seeds.png"
+    plot_cartpole_seed_comparison(ckpt_rows_by_run, cartpole_plot_path)
+    written_plots.append(cartpole_plot_path)
 
+    td3_case_study_path = RESULTS_DIR / "finding_td3_seed0_collapse.png"
+    if plot_td3_seed0_collapse_case_study(ckpt_rows_by_run, td3_case_study_path):
+        written_plots.append(td3_case_study_path)
+
+    print_summary(rows)
     print_checkpoint_summary(ckpt_rows_by_run)
-    print(f"\nCSV: {csv_path}")
-    print(f"Plot: {plot_path}")
+    print(f"\nCSVs: {model_csv_path}, {checkpoint_csv_path}")
+    print(f"Plot: {RESULTS_DIR / 'finding_cartpole_5M_oscillation.png'}")
+    for path in written_plots:
+        print(f"Plot: {path}")
 
 
 # CLI
@@ -762,36 +746,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--plots-only", action="store_true",
-        help="Skip model loading/MC rollouts, regenerate plots from the existing "
-             "results/model_evaluation.csv (+ cheap evaluations.npz reads) instead. "
-             "Combined with --checkpoints, regenerates from "
-             "results/checkpoint_evaluation.csv instead, with no models/ access at all.",
-    )
-    parser.add_argument(
-        "--checkpoints", action="store_true",
-        help="Evaluate every saved checkpoint (models/*/checkpoints/model_*_steps.zip) "
-             "of the 1M-timestep runs found under models/ instead of the final/best "
-             "models, and plot bias/performance over the course of training.",
-    )
-    parser.add_argument(
-        "--output", type=str, default=None,
-        help="Only with --checkpoints: write the CSV (and its plot) to this path "
-             "instead of results/checkpoint_evaluation.csv. Use this when evaluating "
-             "your own local checkpoints for a run someone else already has results "
-             "for, so you don't overwrite their CSV -- hand back the separate file "
-             "to be merged in by hand instead.",
+        help="Skip model loading/MC rollouts/re-evaluation, regenerate plots from "
+             "the existing results/model_evaluation.csv and "
+             "results/checkpoint_evaluation.csv instead.",
     )
     args = parser.parse_args()
 
     RESULTS_DIR.mkdir(exist_ok=True)
-
-    if args.checkpoints:
-        run_checkpoints_mode(
-            plots_only=args.plots_only,
-            csv_path=Path(args.output) if args.output else None,
-        )
-    else:
-        run_default_mode(plots_only=args.plots_only)
+    run(plots_only=args.plots_only)
 
 
 if __name__ == "__main__":
