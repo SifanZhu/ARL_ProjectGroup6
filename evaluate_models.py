@@ -71,9 +71,9 @@ RE_EVAL_SEED = 777
 CHECKPOINT_STEPS_RE = re.compile(r"(\d+)_steps")
 
 CHECKPOINT_TAG_LABELS = {
-    "": "run A",
+    "run_A": "run A",
+    "run_B": "run B",
     "old": "old",
-    "sifan": "run B",
 }
 
 
@@ -387,12 +387,12 @@ def checkpoint_series_labels(ckpt_rows_by_run: dict[str, list[dict]]) -> dict[st
 
 def select_canonical_checkpoint_runs(ckpt_rows_by_run: dict[str, list[dict]]) -> dict[str, list[dict]]:
     """Picks one run_name per (algo, env_id), for plots that show a single
-    line per group rather than every known variant -- preferring the plain,
-    untagged run_name (bare "..._seed<N>", no extra suffix) when more than
-    one run shares a group. A plot that specifically wants to show every
-    variant (e.g. plot_cartpole_old_vs_new_checkpoints, which exists to
-    compare DQN/CartPole-v1's two separately-trained runs) should keep using
-    the full ckpt_rows_by_run instead of this.
+    line per group rather than every known variant -- preferring the
+    "run_A"-tagged run_name (see CHECKPOINT_TAG_LABELS) when more than one
+    run shares a group. A plot that specifically wants to show every variant
+    (e.g. plot_cartpole_old_vs_new_checkpoints, which exists to compare
+    DQN/CartPole-v1's two separately-trained runs) should keep using the
+    full ckpt_rows_by_run instead of this.
     """
     by_group: dict[tuple[str, str], list[str]] = {}
     for run_name, rows in ckpt_rows_by_run.items():
@@ -404,8 +404,8 @@ def select_canonical_checkpoint_runs(ckpt_rows_by_run: dict[str, list[dict]]) ->
         if len(run_names) == 1:
             chosen = run_names[0]
         else:
-            bare = [r for r in run_names if re.search(r"_seed\d+$", r)]
-            chosen = bare[0] if bare else sorted(run_names)[0]
+            run_a = [r for r in run_names if re.search(r"_seed\d+_*run_A$", r)]
+            chosen = run_a[0] if run_a else sorted(run_names)[0]
         canonical[chosen] = ckpt_rows_by_run[chosen]
     return canonical
 
