@@ -385,31 +385,6 @@ def checkpoint_series_labels(ckpt_rows_by_run: dict[str, list[dict]]) -> dict[st
     return labels
 
 
-def select_canonical_checkpoint_runs(ckpt_rows_by_run: dict[str, list[dict]]) -> dict[str, list[dict]]:
-    """Picks one run_name per (algo, env_id), for plots that show a single
-    line per group rather than every known variant -- preferring the
-    "run_A"-tagged run_name (see CHECKPOINT_TAG_LABELS) when more than one
-    run shares a group. A plot that specifically wants to show every variant
-    (e.g. plot_cartpole_old_vs_new_checkpoints, which exists to compare
-    DQN/CartPole-v1's two separately-trained runs) should keep using the
-    full ckpt_rows_by_run instead of this.
-    """
-    by_group: dict[tuple[str, str], list[str]] = {}
-    for run_name, rows in ckpt_rows_by_run.items():
-        algo, env_id = rows[0]["algo"], rows[0]["env_id"]
-        by_group.setdefault((algo, env_id), []).append(run_name)
-
-    canonical: dict[str, list[dict]] = {}
-    for run_names in by_group.values():
-        if len(run_names) == 1:
-            chosen = run_names[0]
-        else:
-            run_a = [r for r in run_names if re.search(r"_seed\d+_*run_A$", r)]
-            chosen = run_a[0] if run_a else sorted(run_names)[0]
-        canonical[chosen] = ckpt_rows_by_run[chosen]
-    return canonical
-
-
 # Plots: default (budget-comparison) mode
 
 def _aggregate_new_by_budget(
@@ -614,37 +589,50 @@ def run_default_mode(plots_only: bool) -> None:
 
 def plot_checkpoint_progression(all_ckpt_rows: dict[str, list[dict]], out_path: Path) -> None:
     """Tracks relative Q-value bias and re-eval performance across every
-    saved checkpoint of the 1M-timestep runs, one line per (algo, env_id) --
-    when more than one run shares a group (e.g. DQN/CartPole-v1's two
-    separately-trained runs), only the canonical/untagged one is shown here
-    (see select_canonical_checkpoint_runs); use
-    plot_cartpole_old_vs_new_checkpoints for the full run-to-run comparison.
+    saved checkpoint of the 1M-timestep runs, one line per (algo, env_id),
+    averaged across every run_name sharing that group (e.g. seeds 0-4, or
+    DQN/CartPole-v1's run_A/run_B/seed1-4), with a shaded +/-1 std band
+    across those runs at each checkpoint_steps value. A checkpoint_steps
+    value not shared by every run (e.g. run_A's coarser ~50k-step grid vs.
+    others' 10k grid) is still averaged, just over however many runs
+    actually report it. See plot_cartpole_old_vs_new_checkpoints for the
+    individual per-run comparison this collapses.
     """
-    canonical = select_canonical_checkpoint_runs(all_ckpt_rows)
+    groups: dict[tuple[str, str], dict[int, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    for rows in all_ckpt_rows.values():
+        for row in rows:
+            groups[(row["algo"], row["env_id"])][row["checkpoint_steps"]].append(row)
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-    for run_name, rows in canonical.items():
-        rows = sorted(rows, key=lambda r: r["checkpoint_steps"])
-        if not rows:
-            continue
-        algo, env_id = rows[0]["algo"], rows[0]["env_id"]
+    for (algo, env_id), by_step in sorted(groups.items()):
+        steps = sorted(by_step)
         label = f"{algo.upper()}/{env_id}"
-        steps = [r["checkpoint_steps"] for r in rows]
-        ax1.plot(steps, [r["relative_bias"] for r in rows], marker="o", label=label)
-        ax2.plot(steps, [r["reeval_mean"] for r in rows], marker="o", label=label)
+
+        def mean_std(field: str) -> tuple[np.ndarray, np.ndarray]:
+            values = [[r[field] for r in by_step[s]] for s in steps]
+            return np.array([np.mean(v) for v in values]), np.array([np.std(v) for v in values])
+
+        bias_mean, bias_std = mean_std("relative_bias")
+        line1, = ax1.plot(steps, bias_mean, marker="o", label=label)
+        ax1.fill_between(steps, bias_mean - bias_std, bias_mean + bias_std, color=line1.get_color(), alpha=0.2)
+
+        reeval_mean, reeval_std = mean_std("reeval_mean")
+        line2, = ax2.plot(steps, reeval_mean, marker="o", label=label)
+        ax2.fill_between(steps, reeval_mean - reeval_std, reeval_mean + reeval_std, color=line2.get_color(), alpha=0.2)
 
     ax1.axhline(0, color="gray", linestyle="--", linewidth=0.8)
     ax1.set_xlabel("Timesteps")
     _set_timestep_xaxis(ax1)
     ax1.set_ylabel("Relative Q-value bias (bias / |mc_return_mean|)")
     ax1.yaxis.set_major_formatter(lambda y, _: f"{y:.0%}")
-    ax1.set_title("Relative Q-value bias over training\n(1M runs, every checkpoint)")
+    ax1.set_title("Relative Q-value bias over training\n(1M runs, mean ±1 std across runs)")
     ax1.legend()
 
     ax2.set_xlabel("Timesteps")
     _set_timestep_xaxis(ax2)
     ax2.set_ylabel(f"Re-eval mean reward (n={RE_EVAL_N_EPISODES})")
-    ax2.set_title("Performance over training\n(1M runs, every checkpoint)")
+    ax2.set_title("Performance over training\n(1M runs, mean ±1 std across runs)")
     ax2.legend()
 
     fig.tight_layout()
