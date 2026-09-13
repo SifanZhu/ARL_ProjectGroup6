@@ -86,3 +86,9 @@ SAC/Pendulum, TD3/Pendulum).
 - Then the plot is created by averaging the result over 5 seeds. 
 
 To run it, please read the plot_q_value-state.README.md.
+
+### Q-Function Temporal Analysis
+`Q_Function_Evolution/TemporalAnalysis.py` produces the evolution of Q-function plots of our models under `models/` using their checkpoints.
+- `Plots/separate` contains plots of all available models.
+- `Plots/mean` contains the "means-over-seeds" plots.
+
