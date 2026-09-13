@@ -75,7 +75,7 @@ models / rerunning Monte Carlo rollouts / re-evaluation):
 python evaluate_models.py --plots-only
 ```
 
-### Folder "Q-value_VS_State"
+## Folder "Q-value_VS_State"
 
 - Used to produce a Q-value-bias plot per trained agent (DQN/CartPole, DQN/Pendulum,
 SAC/Pendulum, TD3/Pendulum).
@@ -87,9 +87,9 @@ SAC/Pendulum, TD3/Pendulum).
 
 To run it, please read the plot_q_value-state.README.md.
 
-### Folder "analysis"
+## Folder "analysis"
 
-## analysis/qvalue_bias.py
+### analysis/qvalue_bias.py
 
 Core module for Q-value bias analysis. Contains:
 - `get_q_value(...)`: Extracts Q-values from a trained model (DQN, SAC, TD3).
@@ -107,7 +107,7 @@ python -m analysis.qvalue_bias
 
 ---
 
-## analysis/_plot_qvalue_bias_multiseed.py
+### analysis/_plot_qvalue_bias_multiseed.py
 
 Plots Q-value bias (prediction vs. actual return) for the final models, pooled
 across multiple seeds. One panel per algorithm, points colored by seed. Only
@@ -122,7 +122,7 @@ python -m analysis._plot_qvalue_bias_multiseed --n-states 100 --out qvalue_bias_
 
 ---
 
-## analysis/plot_training_curves_avg.py
+### analysis/plot_training_curves_avg.py
 
 Plots training reward curves (from SB3's `monitor.csv`), averaged across all
 seeds ± standard deviation as a band. One combined plot for all selected
@@ -137,7 +137,7 @@ python -m analysis.plot_training_curves_avg --dqn-env-id CartPole-v1
 
 ---
 
-## analysis/plot_bias_performance_over_training.py
+### analysis/plot_bias_performance_over_training.py
 
 Time-series version of `_plot_qvalue_bias_multiseed.py`: instead of only the
 final model, this script evaluates **all saved checkpoints** per seed.
@@ -158,7 +158,7 @@ python -m analysis.plot_bias_performance_over_training --n-episodes 20 --max-che
 
 **Note:** All scripts are run from the project root (`python -m analysis.<name>`), not directly from inside the `analysis` folder, since they import `train.py` from the root.
 
-### Q-Function Temporal Analysis
+## Q-Function Temporal Analysis
 `Q_Function_Evolution/TemporalAnalysis.py` produces the evolution of Q-function plots of our models under `models/` using their checkpoints.
 - `Plots/separate` contains plots of all available models.
 - `Plots/mean` contains the "means-over-seeds" plots.
