@@ -52,38 +52,12 @@ from stable_baselines3.common.base_class import BaseAlgorithm
 DISCRETE_ALGOS = (DQN,)
 CONTINUOUS_ALGOS = (SAC, TD3)
 
-# Ein reset_fn bringt die Env in einen gewünschten State und gibt die Start-Obs zurück.
-# Signatur: reset_fn(env) -> obs (np.ndarray). Env-spezifisch (z.B. CartPole vs Pendulum
-# haben unterschiedliche interne State-Repräsentationen) -> lebt NICHT in diesem Modul,
-# wird von außen übergeben (z.B. aus envs/state_setters.py, sobald wir die Grid-Analyse
-# angehen).
-
-
-# ---------------------------------------------------------------------------
-# 1. Q-Wert-Extraktion
-# ---------------------------------------------------------------------------
-
 @th.no_grad()
 def get_q_value(
     model: BaseAlgorithm,
     obs: np.ndarray,
     action: Optional[np.ndarray] = None,
 ) -> Union[np.ndarray, float, Dict[str, float]]:
-    """Gibt den/die Q-Wert(e) für einen State (und ggf. eine Aktion) zurück.
-
-    DQN (diskrete Aktionen):
-        action=None -> Q-Werte für ALLE Aktionen, np.ndarray shape (n_actions,)
-        action=a    -> skalarer Q-Wert Q(s,a) als float
-
-    SAC/TD3 (kontinuierliche Aktionen, Twin-Critics):
-        action=None -> es wird die Aktion genommen, die die Policy deterministisch
-                        wählen würde (model.predict)
-        action=a    -> Q(s,a) für genau diese Aktion
-        Rückgabe immer ein dict: {"q_values": [Q1, Q2], "min": ..., "mean": ...}
-        "min" ist der Wert, den SB3 intern auch für den Trainings-Zielwert nutzt.
-
-    obs: 1D-Array (ein einzelner State, kein Batch).
-    """
     obs_batch = obs[np.newaxis, :] if obs.ndim == 1 else obs
 
     if isinstance(model, DISCRETE_ALGOS):
@@ -104,12 +78,12 @@ def get_q_value(
         obs_tensor, _ = model.policy.obs_to_tensor(obs_batch)
         action_tensor = th.as_tensor(action_batch, dtype=th.float32, device=model.device)
 
-        critic_outputs = model.critic(obs_tensor, action_tensor)  # tuple, 1 Tensor pro Critic-Netz
+        critic_outputs = model.critic(obs_tensor, action_tensor)
         q_list = [float(q.cpu().numpy()[0, 0]) for q in critic_outputs]
 
         return {
-            "q_values": q_list,          # z.B. [Q1, Q2]
-            "min": min(q_list),           # das, was SB3 intern für den Zielwert nutzt
+            "q_values": q_list,
+            "min": min(q_list),
             "mean": float(np.mean(q_list)),
         }
 
@@ -119,11 +93,6 @@ def get_q_value(
             f"Erwartet DQN, SAC oder TD3."
         )
 
-
-# ---------------------------------------------------------------------------
-# 2. Monte-Carlo-Return
-# ---------------------------------------------------------------------------
-
 def rollout_return(
     model: BaseAlgorithm,
     env,
@@ -132,12 +101,6 @@ def rollout_return(
     max_steps: int = 1000,
     reset_fn: Optional[Callable] = None,
 ):
-    """Führt EINE Episode aus und gibt (start_obs, start_action, diskontierter_return) zurück.
-
-    reset_fn: optionaler Callback reset_fn(env) -> obs, um die Env in einen bestimmten
-    State zu versetzen statt eines zufälligen env.reset(). Ohne reset_fn: normaler
-    zufälliger Reset.
-    """
     if reset_fn is not None:
         obs = reset_fn(env)
     else:
@@ -191,11 +154,6 @@ def estimate_return_at_state(
         "n_episodes": n_episodes,
     }
 
-
-# ---------------------------------------------------------------------------
-# 3. Bias über viele (zufällige) States -- Nachfolger von estimate_q_bias_dqn
-# ---------------------------------------------------------------------------
-
 def estimate_bias_over_random_states(
     model: BaseAlgorithm,
     env,
@@ -203,16 +161,6 @@ def estimate_bias_over_random_states(
     deterministic: bool = True,
     max_steps: int = 1000,
 ) -> Dict:
-    """Vergleicht für n_states zufällige Episoden-Starts jeweils den vorhergesagten
-    Q-Wert mit dem tatsächlich erzielten (einzelnen) Return -- algo-agnostisch
-    (DQN, SAC, TD3). Direkter Nachfolger von `estimate_q_bias_dqn` im alten Skript.
-
-    Rückgabe (dict):
-        q_preds: np.ndarray, ein Q-Wert pro State (bei SAC/TD3: der "min"-Wert)
-        mc_returns: np.ndarray, ein MC-Return pro State
-        bias: np.ndarray, q_preds - mc_returns (+ = Überschätzung, - = Unterschätzung)
-        raw_q: Liste der vollen get_q_value()-Rückgaben (bei SAC/TD3 inkl. Q1/Q2 einzeln)
-    """
     gamma = model.gamma
     q_preds, mc_returns, raw_q = [], [], []
 
@@ -242,7 +190,6 @@ def estimate_bias_over_random_states(
 
 
 if __name__ == "__main__":
-    # Kleiner Selbsttest / Beispiel-Aufruf, analog zum alten Skript.
     import gymnasium as gym
     from train import DiscretizeActionWrapper
 
@@ -256,7 +203,6 @@ if __name__ == "__main__":
     )
     eval_env.close()
 
-    # DiscretizeActionWrapper maps discrete action indices back to continuous torques
     model_p = DQN.load("models/dqn_Pendulum-v1_steps5000000_seed0/final_model")
     eval_env_p = DiscretizeActionWrapper(gym.make("Pendulum-v1"))
 

@@ -1,5 +1,5 @@
 """
-visualization/plot_training_curves_avg.py
+analysis/plot_training_curves_avg.py
 
 Wie plot_training_curves.py, aber gemittelt ueber alle Seeds statt nur den
 ersten Treffer zu nehmen (die urspruengliche find_run_dir() liefert per
@@ -34,36 +34,17 @@ ALGOS = ["dqn", "sac", "td3"]
 ALGO_COLORS = {"dqn": "tab:blue", "sac": "tab:orange", "td3": "tab:green"}
 ALGO_LABELS = {"dqn": "DQN", "sac": "SAC", "td3": "TD3"}
 
-# Theoretical min/max achievable episode reward per environment, used to draw
-# reference lines. Pendulum-v1: reward = -(theta^2 + 0.1*theta_dot^2 + 0.001*u^2)
-# per step, theta in [-pi, pi], theta_dot clipped to [-8, 8], u clipped to
-# [-2, 2], default episode length 200 steps -> max cost per step =
-# pi^2 + 0.1*8^2 + 0.001*2^2 ~= 16.2736, so min reward = -200 * 16.2736.
-# Max reward per step = 0 (theta=0, theta_dot=0, u=0) -> max episode reward = 0.
-# CartPole-v1: +1 reward per surviving step, episode ends at 500 steps max
-# (TimeLimit) or on failure -> min = 0 (fails immediately), max = 500.
 ENV_REWARD_BOUNDS = {
     "Pendulum-v1": (-200 * (np.pi**2 + 0.1 * 8**2 + 0.001 * 2**2), 0.0),
     "CartPole-v1": (0.0, 500.0),
 }
 
-# SAC/TD3 are only ever trained on Pendulum-v1 in this project (see train.py's
-# DEFAULT_ENVS), so we can assume that env for bounds/reference-line purposes
-# even when no --env override is given. DQN needs an explicit override since
-# it can be either CartPole-v1 or Pendulum-v1.
 ASSUMED_ENV = {"sac": "Pendulum-v1", "td3": "Pendulum-v1"}
 
 
 def find_seed_dirs(
     models_dir: Path, algo: str, timesteps: int, seeds: List[int], env_id: Optional[str] = None
 ) -> List[Path]:
-    """Alle Seed-Ordner fuer (algo, timesteps).
-
-    env_id=None: Env-Name im Ordnernamen wird per Wildcard offengelassen (Vorsicht bei
-    DQN, das auf CartPole UND Pendulum trainiert sein kann -- sorted() waehlt dann
-    implizit "CartPole-v1" vor "Pendulum-v1", rein alphabetisch).
-    env_id="CartPole-v1" / "Pendulum-v1": explizit nur diesen Env-Ordner suchen.
-    """
     dirs = []
     for seed in seeds:
         env_part = env_id if env_id else "*"
@@ -86,14 +67,6 @@ def load_reward_curve(run_dir: Path) -> Tuple[Optional[np.ndarray], Optional[np.
 def average_curves(
     run_dirs: List[Path], n_points: int = 200
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, int]]:
-    """Interpoliert jede Seed-Kurve auf ein gemeinsames Timestep-Gitter
-    [0, min(max_x aller Seeds)] und gibt (x_grid, mean, std, n_seeds) zurueck.
-
-    Wir schneiden bei min(max_x) ab, damit der Mittelwert an jeder Stelle des
-    Gitters wirklich auf ALLEN Seeds basiert (kein Seed faellt vorzeitig aus
-    der Mittelung, nur weil er (z.B. bei CartPole durch fruehe Terminierung)
-    frueher endet als die anderen).
-    """
     curves = [load_reward_curve(d) for d in run_dirs]
     curves = [(x, y) for x, y in curves if x is not None and len(x) >= 2]
 
@@ -137,9 +110,6 @@ def plot_averaged(
         env_label = f" [{env_id}]" if env_id else ""
         ax.plot(x_grid, mean, color=color, label=f"{ALGO_LABELS[algo]}{env_label} (n={n_seeds} seeds)")
 
-        # mean +/- std can exceed the physical reward bounds even though no
-        # individual episode ever does (it's a statistic, not a raw trajectory).
-        # Clip the shaded band so it never overshoots visually.
         lower, upper = mean - std, mean + std
         bound_env = env_id if env_id else ASSUMED_ENV.get(algo)
         if bound_env in ENV_REWARD_BOUNDS:
@@ -151,9 +121,6 @@ def plot_averaged(
         if bound_env:
             envs_plotted.add(bound_env)
 
-    # Reference lines for theoretical min/max achievable episode reward, one
-    # pair per distinct environment actually plotted (usually just one, e.g.
-    # Pendulum-v1, if all three algos were trained on the same env).
     line_styles = [":", "--"]
     for i, env_id in enumerate(sorted(envs_plotted)):
         if env_id not in ENV_REWARD_BOUNDS:

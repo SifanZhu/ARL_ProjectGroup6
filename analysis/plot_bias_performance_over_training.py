@@ -1,5 +1,5 @@
 """
-plot_bias_performance_over_training.py
+analysis/plot_bias_performance_over_training.py
 
 Zeitverlaufs-Version von plot_qvalue_bias_multiseed.py: statt nur das
 final_model auszuwerten, werden ALLE gespeicherten Checkpoints
@@ -36,15 +36,13 @@ from matplotlib.ticker import FuncFormatter, PercentFormatter
 from stable_baselines3 import DQN, SAC, TD3
 from stable_baselines3.common.base_class import BaseAlgorithm
 
-# --- Anpassen, falls Modulpfade bei euch abweichen ---
-from qvalue_bias import get_q_value
+from analysis.qvalue_bias import get_q_value
 from train import DiscretizeActionWrapper
 
 ALGO_CLASSES = {"dqn": DQN, "sac": SAC, "td3": TD3}
 FIXED_ALGO_ENVS = {"sac": "Pendulum-v1", "td3": "Pendulum-v1"}
 ALGO_TITLE_NAMES = {"dqn": "DQN", "sac": "SAC", "td3": "TD3"}
 
-# Theoretisches Min/Max pro Episode (siehe plot_training_curves_avg.py fuer Herleitung)
 ENV_REWARD_BOUNDS = {
     "Pendulum-v1": (-200 * (np.pi**2 + 0.1 * 8**2 + 0.001 * 2**2), 0.0),
     "CartPole-v1": (0.0, 500.0),
@@ -81,11 +79,6 @@ def make_eval_env(algo: str, env_id: str):
 def rollout_episode(
     model: BaseAlgorithm, env, gamma: float, deterministic: bool = True, max_steps: int = 1000
 ) -> Tuple[np.ndarray, np.ndarray, float, float]:
-    """Fuehrt eine Episode aus, gibt (start_obs, start_action, discounted_return,
-    raw_return) zurueck -- discounted_return zum Vergleich mit dem Q-Wert
-    (das ist es, was die Q-Funktion approximiert), raw_return (undiskontiert)
-    als Performance-Metrik.
-    """
     obs, _ = env.reset()
     start_obs = obs.copy()
     start_action, _ = model.predict(start_obs, deterministic=deterministic)
@@ -140,11 +133,6 @@ def collect_over_training(
     n_episodes: int,
     max_checkpoints: Optional[int],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Sammelt fuer jeden gemeinsamen Checkpoint-Step ueber alle Seeds:
-    relative Bias (mean/std) und mittleren Reward (mean/std).
-
-    Rueckgabe: (steps, bias_mean, bias_std, reward_mean, reward_std)
-    """
     algo_cls = ALGO_CLASSES[algo]
 
     # Checkpoints pro Seed sammeln, Vereinigung der Steps ueber alle Seeds bilden
@@ -165,7 +153,6 @@ def collect_over_training(
 
     all_steps = sorted(set().union(*[set(c.keys()) for c in per_seed_ckpts.values()]))
     if max_checkpoints is not None and len(all_steps) > max_checkpoints:
-        # gleichmaessig ueber den Trainingsverlauf subsamplen statt nur die ersten N
         idx = np.linspace(0, len(all_steps) - 1, max_checkpoints).round().astype(int)
         all_steps = [all_steps[i] for i in sorted(set(idx))]
 
