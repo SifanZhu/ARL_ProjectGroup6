@@ -9,12 +9,15 @@ visualization.py, temporalAnalysis.py and spatialAnalysis.py.
 import glob
 import os
 import re
+import sys
+from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
 from stable_baselines3 import DQN, SAC, TD3
 
-from Qvalue_bias import estimate_return_at_state, get_q_value
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from analysis.qvalue_bias import estimate_return_at_state, get_q_value
 
 # ============================================================
 # Configuration

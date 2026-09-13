@@ -24,7 +24,7 @@ The measurement primitives:
      during training. Per-budget only.
 
   2. Q-value bias via Monte-Carlo rollout (bias_stats_from_path /
-     Qvalue_bias.estimate_bias_over_random_states): for n_states=50 random
+     analysis.qvalue_bias.estimate_bias_over_random_states): for n_states=50 random
      resets, rolls out one episode under the model's own deterministic
      policy and compares its own predicted Q-value against the return that
      rollout actually achieved.
@@ -57,7 +57,7 @@ from stable_baselines3 import DQN, SAC, TD3
 from stable_baselines3.common.evaluation import evaluate_policy
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from Qvalue_bias import estimate_bias_over_random_states
+from analysis.qvalue_bias import estimate_bias_over_random_states
 from train import DiscretizeActionWrapper
 
 ALGOS = {"dqn": DQN, "sac": SAC, "td3": TD3}

@@ -41,14 +41,14 @@ re-evaluating every trained model in `models/`:
 
 - **Training-time eval curve stats**: from each run's `eval/evaluations.npz`.
 - **Q-value bias**: Monte Carlo rollout comparing a model's own predicted
-  Q-value against its actually achieved return (`Qvalue_bias.py`).
+  Q-value against its actually achieved return (`analysis/qvalue_bias.py`).
 - **Independent re-evaluation**: checks whether an apparent best-vs-final
   collapse in the training-time eval curve survives re-evaluation on more
   episodes with a fresh seed.
 
 ### Needed Files
 
-- `Qvalue_bias.py` and `train.py` at the repo root
+- `analysis/qvalue_bias.py` and `train.py` (at the repo root)
 - in default mode: `models/` at the repo root
 - in `--plots-only` mode: `checkpoint_evaluation.csv` and `model_evaluation.csv`
   in `instability_analysis/results`
@@ -160,6 +160,6 @@ python -m analysis.plot_bias_performance_over_training --n-episodes 20 --max-che
 
 ## Q-Function Temporal Analysis
 `Q_Function_Evolution/TemporalAnalysis.py` produces the evolution of Q-function plots of our models under `models/` using their checkpoints.
-- `Plots/separate` contains plots of all available models.
-- `Plots/mean` contains the "means-over-seeds" plots.
+- `plots/separate` contains plots of all available models.
+- `plots/mean` contains the "means-over-seeds" plots.
 

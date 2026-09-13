@@ -2,7 +2,8 @@ gymnasium==1.0.0
 stable-baselines3==2.4.1
 torch>=2.0.0
 matplotlib>=3.7.0
-numpy>=1.24.0appnope==0.1.4
+numpy>=1.24.0
+appnope==0.1.4
 asttokens==3.0.2
 cloudpickle==3.1.2
 comm==0.2.3
@@ -15,7 +16,6 @@ Farama-Notifications==0.0.6
 filelock==3.32.0
 fonttools==4.63.0
 fsspec==2026.6.0
-gymnasium==1.0.0
 ipykernel==7.3.0
 ipython==9.15.0
 ipython_pygments_lexers==1.1.1
@@ -47,7 +47,6 @@ python-dateutil==2.9.0.post0
 pyzmq==27.1.0
 setuptools==83.0.0
 six==1.17.0
-stable_baselines3==2.4.1
 stack-data==0.6.3
 sympy==1.14.0
 torch==2.13.0
