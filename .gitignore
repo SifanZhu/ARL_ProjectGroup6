@@ -2,3 +2,5 @@ models/**/checkpoints/
 .venv
 __pycache__
 .idea
+
+models/
