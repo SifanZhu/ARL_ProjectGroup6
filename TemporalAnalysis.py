@@ -38,6 +38,20 @@ from rl_common import (
     set_state,
 )
 
+# ---------------------------------------------------------------------------
+# Theoretical Q-value bounds for DQN on CartPole
+# ---------------------------------------------------------------------------
+
+DQN_CARTPOLE_GAMMA = 0.99
+CARTPOLE_MAX_STEPS = 500
+
+DQN_CARTPOLE_Q_LOWER = 0.0
+
+# 99.34 for gamma = 0.99 and maxsteps=500
+DQN_CARTPOLE_Q_UPPER = (
+    1 - DQN_CARTPOLE_GAMMA ** CARTPOLE_MAX_STEPS
+) / (1 - DQN_CARTPOLE_GAMMA)
+
 
 # ---------------------------------------------------------------------------
 # Output directories
@@ -145,7 +159,28 @@ def make_temporal_plot(run):
                 q_values[si, ai, :],
                 marker="o",
                 markersize=3,
-                label=action_label(action),
+                label=(
+                    f"a=push left" if env_id == "CartPole-v1" and action == 0
+                    else f"a=push right" if env_id == "CartPole-v1" and action == 1
+                    else action_label(action)
+                ),
+            )
+
+        
+                # Theoretical Q-value bounds for DQN on CartPole.
+        if algo == "dqn" and env_id == "CartPole-v1":
+            ax.axhline(
+                DQN_CARTPOLE_Q_LOWER,
+                linestyle="--",
+                linewidth=0.8,
+                label="Theoretical lower bound",
+            )
+
+            ax.axhline(
+                DQN_CARTPOLE_Q_UPPER,
+                linestyle="--",
+                linewidth=0.8,
+                label="Theoretical upper bound",
             )
 
         # Mark the final checkpoint.
@@ -214,17 +249,20 @@ def make_temporal_plot_mean(runs):
     # Select the longest training runs.
     # ---------------------------------------------------------------
 
-    max_steps = max(run["steps"] for run in runs)
+    if algo == "dqn" and env_id == "CartPole-v1":
+        target_steps = 1_000_000
+    else:
+        target_steps = max(run["steps"] for run in runs)
 
     selected_runs = [
         run
         for run in runs
-        if run["steps"] == max_steps
+        if run["steps"] == target_steps
     ]
 
     print(
         f"  {algo}_{env_id}: using "
-        f"{len(selected_runs)} seed(s) at {max_steps} steps"
+        f"{len(selected_runs)} seed(s) at {target_steps} steps"
     )
 
     # ---------------------------------------------------------------
@@ -372,7 +410,7 @@ def make_temporal_plot_mean(runs):
 
     filename = (
         f"temporal_{algo}_{env_id}_"
-        f"steps{max_steps}_mean.png"
+        f"steps{target_steps}_mean.png"
     )
 
     output_path = os.path.join(
@@ -434,6 +472,7 @@ def main():
         print(f"Processing mean {algo}_{env_id}...")
 
         make_temporal_plot_mean(group_runs)
+        
 
     print("\nPlots saved to:")
     print(f"  Separate: {SEPARATE_TEMPORAL_DIR}/")
