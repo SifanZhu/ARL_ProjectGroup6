@@ -249,7 +249,7 @@ def make_temporal_plot_mean(runs):
     # Select the longest training runs.
     # ---------------------------------------------------------------
 
-    if algo == "dqn" and env_id == "CartPole-v1":
+    if algo == "dqn":
         target_steps = 1_000_000
     else:
         target_steps = max(run["steps"] for run in runs)
@@ -380,6 +380,23 @@ def make_temporal_plot_mean(runs):
                 markersize=3,
                 label=action_label(action),
             )
+
+        # Theoretical Q-value bounds for DQN on CartPole.
+        if algo == "dqn" and env_id == "CartPole-v1":
+            ax.axhline(
+                DQN_CARTPOLE_Q_LOWER,
+                linestyle="--",
+                linewidth=0.8,
+                label="Theoretical lower bound",
+            )
+
+            ax.axhline(
+                DQN_CARTPOLE_Q_UPPER,
+                linestyle="--",
+                linewidth=0.8,
+                label="Theoretical upper bound",
+            )
+
 
         # Mark final checkpoint.
         ax.axvline(
