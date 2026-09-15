@@ -163,3 +163,5 @@ python -m analysis.plot_bias_performance_over_training --n-episodes 20 --max-che
 - `plots/separate` contains plots of all available models.
 - `plots/mean` contains the "means-over-seeds" plots.
 
+## The project's protocol
+See the Applied_RL_Group6_Beyond_Convergences_An_Empirical_Analysis_of_Learned_Q_Functions_in_Model_Free_RL.pdf in the main branch.
